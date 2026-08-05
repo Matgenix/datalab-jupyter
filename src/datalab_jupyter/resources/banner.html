@@ -1,0 +1,54 @@
+<div style="border-left: 5px solid #20a779; background: #f4faf8; padding: 1rem 1.25rem;">
+<strong>Connected to datalab</strong><br>
+Every Python kernel already contains <code>datalab</code>, an authenticated
+<code>DatalabClient</code>, and <code>current_user</code>, a snapshot of your identity.
+You do not need to log in or create an API key. Calls made with <code>datalab</code>
+use your current datalab permissions.
+
+<details style="margin-top: 0.75rem;">
+<summary style="cursor: pointer; font-weight: 600;">Examples and help</summary>
+<div style="margin-top: 0.75rem;">
+<p>Run these examples in a Python code cell. They only read data.</p>
+
+<p><strong>See your current-user information</strong></p>
+<pre><code>current_user</code></pre>
+
+<p><strong>List samples you can access</strong></p>
+<pre><code>samples = datalab.get_items(item_type="samples")
+samples[:5]</code></pre>
+<p>
+Other supported item types include <code>"cells"</code>,
+<code>"starting_materials"</code> and <code>"equipment"</code>.
+</p>
+
+<p><strong>Get one item by its immutable refcode</strong></p>
+<pre><code>item = datalab.get_item(refcode="your-prefix:ABCDEF")
+item</code></pre>
+<p>Replace the example refcode with one from your datalab deployment.</p>
+
+<p><strong>Search accessible samples</strong></p>
+<pre><code>matches = datalab.search_items("XRD", item_types="samples")
+matches[:5]</code></pre>
+
+<p>For help with a method, use Python's built-in help:</p>
+<pre><code>help(datalab.get_items)</code></pre>
+
+<p>
+Only data permitted for your current account is returned.
+<code>current_user</code> is informational; datalab checks your account and
+permissions on every API request.
+</p>
+<p>
+If your session expires, stop your Jupyter server and launch JupyterLab again
+from the datalab <strong>Tools</strong> menu.
+</p>
+<p>
+<a
+href="https://api-docs.datalab-org.io/en/stable/reference/"
+target="_blank"
+rel="noopener noreferrer"
+>Open the complete datalab Python API reference</a>.
+</p>
+</div>
+</details>
+</div>
