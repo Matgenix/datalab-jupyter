@@ -68,10 +68,6 @@ def load_plugin_settings() -> PluginSettings:
     return PluginSettings(
         client_id=client_id,
         client_secret=client_secret,
-        external_url=_http_base_url(
-            "DATALAB_JUPYTER_EXTERNAL_URL", allow_insecure=allow_insecure
-        ),
-        public_url=_http_base_url(
-            "DATALAB_JUPYTER_PUBLIC_URL", allow_insecure=allow_insecure
-        ),
+        external_url=_http_base_url("DATALAB_JUPYTER_EXTERNAL_URL", allow_insecure=allow_insecure),
+        public_url=_http_base_url("DATALAB_JUPYTER_PUBLIC_URL", allow_insecure=allow_insecure),
     )

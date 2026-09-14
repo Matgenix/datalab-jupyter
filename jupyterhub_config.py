@@ -4,9 +4,10 @@ import hashlib
 import os
 import sys
 
+from traitlets.config import get_config
+
 from datalab_jupyter.hub import DatalabAuthenticator
 from datalab_jupyter.urls import configured_base_url
-from traitlets.config import get_config
 
 c = get_config()
 
