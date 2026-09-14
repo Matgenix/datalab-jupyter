@@ -1,4 +1,4 @@
-"""Datalab tool-plugin entry point for JupyterLab."""
+"""datalab tool-plugin entry point for JupyterLab."""
 
 from .provider import JupyterToolProvider
 

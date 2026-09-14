@@ -1,4 +1,4 @@
-"""JupyterHub-facing Datalab integration."""
+"""JupyterHub-facing datalab integration."""
 
 from .authenticator import DatalabAuthenticator
 

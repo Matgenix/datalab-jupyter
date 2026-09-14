@@ -1,1 +1,1 @@
-"""Jupyter Server integration for Datalab user environments."""
+"""Jupyter Server integration for datalab user environments."""

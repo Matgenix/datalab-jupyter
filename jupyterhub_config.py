@@ -4,10 +4,9 @@ import hashlib
 import os
 import sys
 
-from traitlets.config import get_config
-
 from datalab_jupyter.hub import DatalabAuthenticator
 from datalab_jupyter.urls import configured_base_url
+from traitlets.config import get_config
 
 c = get_config()
 
@@ -45,6 +44,7 @@ c.JupyterHub.db_url = "sqlite:////srv/jupyterhub/jupyterhub.sqlite"
 
 c.JupyterHub.spawner_class = "dockerspawner.DockerSpawner"
 c.DockerSpawner.image = required_environment("DATALAB_JUPYTER_SINGLEUSER_IMAGE")
+c.DockerSpawner.prefix = volume_prefix
 c.DockerSpawner.network_name = network_name
 c.DockerSpawner.use_internal_ip = True
 c.DockerSpawner.remove = True

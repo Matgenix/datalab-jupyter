@@ -1,4 +1,4 @@
-"""Datalab integration for JupyterHub and Jupyter user servers."""
+"""datalab integration for JupyterHub and Jupyter user servers."""
 
 
 def _jupyter_server_extension_points() -> list[dict[str, str]]:

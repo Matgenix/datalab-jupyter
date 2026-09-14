@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "datalab-jupyter"
 dynamic = ["version"]
-description = "Datalab tool integration for JupyterHub and Jupyter user servers"
+description = "datalab tool integration for JupyterHub and Jupyter user servers"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -52,19 +52,13 @@ fallback_version = "0.1.0"
 version_scheme = "post-release"
 
 [tool.uv.sources]
-datalab-server = { git = "https://github.com/Matgenix/datalab.git", branch = "dw/analysis_tools", subdirectory = "pydatalab" }
-
-[tool.uv]
-conflicts = [
-    [{ group = "plugin-dev" }, { extra = "hub" }],
-    [{ group = "plugin-dev" }, { extra = "server" }],
-]
+datalab-server = { git = "https://github.com/datalab-org/datalab.git", subdirectory = "pydatalab" }
 
 [dependency-groups]
 dev = [
     "pre-commit>=4,<5",
 ]
-plugin-dev = ["datalab-server[server]"]
+plugin-dev = ["datalab-server[server]; python_version >= '3.11'"]
 
 [tool.ruff]
 line-length = 100

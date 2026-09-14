@@ -11,7 +11,7 @@ def _environment(name: str) -> str | None:
     return value or None
 
 
-def _http_base_url(name: str) -> str | None:
+def _http_base_url(name: str, *, allow_insecure: bool = False) -> str | None:
     value = _environment(name)
     if value is None:
         return None
@@ -30,7 +30,7 @@ def _http_base_url(name: str) -> str | None:
         is_loopback = ip_address(hostname).is_loopback
     except ValueError:
         is_loopback = hostname == "localhost" or hostname.endswith(".localhost")
-    if parsed.scheme != "https" and not is_loopback:
+    if parsed.scheme != "https" and not is_loopback and not allow_insecure:
         raise ValueError(f"{name} must use HTTPS unless it targets a loopback host")
     return value.rstrip("/")
 
@@ -64,9 +64,14 @@ def load_plugin_settings() -> PluginSettings:
     client_secret = raw_client_secret.strip()
     if not client_secret or client_secret != raw_client_secret or len(client_secret) < 32:
         raise ValueError("DATALAB_JUPYTER_CLIENT_SECRET must contain at least 32 characters")
+    allow_insecure = os.environ.get("DATALAB_JUPYTER_ALLOW_INSECURE_HTTP") == "true"
     return PluginSettings(
         client_id=client_id,
         client_secret=client_secret,
-        external_url=_http_base_url("DATALAB_JUPYTER_EXTERNAL_URL"),
-        public_url=_http_base_url("DATALAB_JUPYTER_PUBLIC_URL"),
+        external_url=_http_base_url(
+            "DATALAB_JUPYTER_EXTERNAL_URL", allow_insecure=allow_insecure
+        ),
+        public_url=_http_base_url(
+            "DATALAB_JUPYTER_PUBLIC_URL", allow_insecure=allow_insecure
+        ),
     )

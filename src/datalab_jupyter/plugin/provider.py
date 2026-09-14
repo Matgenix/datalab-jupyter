@@ -1,4 +1,4 @@
-"""Datalab tool provider and JupyterHub launch-code exchange."""
+"""datalab tool provider and JupyterHub launch-code exchange."""
 
 import hmac
 from importlib.metadata import PackageNotFoundError, version
@@ -79,7 +79,7 @@ class JupyterToolProvider(ToolProvider):
 
 @JUPYTER_BLUEPRINT.route("/exchange", methods=["POST"])
 def exchange_jupyter_launch_code():
-    """Exchange one launch code for a delegated Datalab tool session."""
+    """Exchange one launch code for a delegated datalab tool session."""
 
     payload = request.get_json(silent=True) or {}
     code = payload.get("code")
