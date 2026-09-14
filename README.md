@@ -53,9 +53,50 @@ application URL. Disable the installed tool with
 `PYDATALAB_TOOLS__DISABLED='["jupyter"]'`.
 
 Public and external URLs must use HTTPS unless they target a loopback address. For a trusted,
-temporary preview reached by plain HTTP, set `DATALAB_JUPYTER_ALLOW_INSECURE_HTTP=true` in the
-root `.env`. The Jupyter Compose file passes it to the Datalab API, where the plugin validates its
+temporary non-production deployment reached by plain HTTP, the Datalab API process may explicitly
+set `DATALAB_JUPYTER_ALLOW_INSECURE_HTTP=true`. The plugin reads this setting when it validates the
 public URL. This safety override is disabled by default and must not be used in production.
+It does not disable the launch-code exchange or replace `DATALAB_JUPYTER_CLIENT_ID` and
+`DATALAB_JUPYTER_CLIENT_SECRET`; both credentials remain required.
+
+## Deploy the managed JupyterHub with Datalab Compose
+
+Installing the Python plugin registers the tool in Datalab, but it does not start JupyterHub. A
+deployment that uses the managed Hub must also combine Datalab's Compose file with the companion
+file provided in this repository:
+
+[`deployment/docker-compose.datalab.yml`](deployment/docker-compose.datalab.yml)
+
+For checkouts of `datalab` and `datalab-jupyter` beside one another, run from the Datalab checkout:
+
+```shell
+docker compose \
+  --file docker-compose.yml \
+  --file ../datalab-jupyter/deployment/docker-compose.datalab.yml \
+  --profile prod up --detach --build
+```
+
+The companion file adds JupyterHub, its persistent data volume, and the private `tools` network. It
+also gives the Datalab API the `datalab-api` network alias used by JupyterHub. It does not install
+the API plugin; keep `datalab-jupyter[plugin]` in Datalab's `plugins.toml` as described above.
+
+Provide the shared client ID and secret to both the API and JupyterHub. The Hub's
+`DATALAB_JUPYTER_API_URL` must include Datalab's configured API root when it is not `/`. For
+example, use `http://datalab-api:5001/api` when `PYDATALAB_ROOT_PATH=/api`.
+
+The companion file deliberately does not enable or forward the unsafe HTTP option. If a trusted
+non-production deployment intentionally exposes Jupyter over plain HTTP, add a deployment-specific
+Compose override:
+
+```yaml
+services:
+  api:
+    environment:
+      - DATALAB_JUPYTER_ALLOW_INSECURE_HTTP
+```
+
+Then set `DATALAB_JUPYTER_ALLOW_INSECURE_HTTP=true` in the environment used by Compose. HTTPS or a
+loopback URL needs no such override.
 
 ## Configure an external JupyterHub
 
@@ -81,8 +122,8 @@ lifetimes must not exceed the delegated datalab session lifetime.
 
 ## Managed image
 
-The included Dockerfile builds the combined Hub/single-user image used by
-datalab's optional Jupyter companion Compose file:
+The included Dockerfile builds the combined Hub/single-user image used by the companion Compose
+file:
 
 ```shell
 docker build -t datalab-jupyter:0.1.0 .
