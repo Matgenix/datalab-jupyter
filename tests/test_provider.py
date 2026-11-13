@@ -1,7 +1,10 @@
 import importlib.util
 from unittest import TestCase, skipUnless
 
-TOOLS_API_AVAILABLE = importlib.util.find_spec("pydatalab.tools") is not None
+TOOLS_API_AVAILABLE = (
+    importlib.util.find_spec("pydatalab") is not None
+    and importlib.util.find_spec("pydatalab.tools") is not None
+)
 
 if TOOLS_API_AVAILABLE:
     from datalab_jupyter.plugin.provider import JupyterToolProvider
