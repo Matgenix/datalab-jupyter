@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "datalab tool integration for JupyterHub and Jupyter user servers"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.11,<3.12"
+requires-python = ">=3.11,<3.13"
 authors = [{ name = "datalab development team", email = "dev@datalab-org.io" }]
 dependencies = []
 
