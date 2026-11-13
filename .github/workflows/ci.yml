@@ -19,11 +19,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11"]
+        python-version: ["3.11"]
         environment: ["plugin", "jupyter"]
-        exclude:
-          - python-version: "3.10"
-            environment: plugin
     steps:
       - uses: actions/checkout@v5
         with:
@@ -37,8 +34,12 @@ jobs:
           enable-cache: true
       - if: matrix.environment == 'plugin'
         run: uv sync --locked --extra plugin --group plugin-dev --dev
+      - if: matrix.environment == 'plugin'
+        run: uv run python -m unittest tests.test_provider -v
       - if: matrix.environment == 'jupyter'
         run: uv sync --locked --extra hub --extra server --dev
+      - if: matrix.environment == 'jupyter'
+        run: uv run python -m unittest discover -v
       - run: uv build
 
   pre-commit:
@@ -50,7 +51,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.10"
+          python-version: "3.11"
       - uses: astral-sh/setup-uv@v7
         with:
           version: ${{ env.UV_VERSION }}

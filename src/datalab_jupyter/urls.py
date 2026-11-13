@@ -1,7 +1,20 @@
 """Shared browser URL handling for the managed JupyterHub."""
 
 import os
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+
+def redact_query_parameter(uri: str, parameter: str) -> str:
+    """Remove one sensitive parameter from a URI while preserving the others."""
+    parts = urlsplit(uri)
+    safe_query = urlencode(
+        [
+            (key, value)
+            for key, value in parse_qsl(parts.query, keep_blank_values=True)
+            if key != parameter
+        ]
+    )
+    return urlunsplit(("", "", parts.path, safe_query, ""))
 
 
 def configured_base_url() -> str:

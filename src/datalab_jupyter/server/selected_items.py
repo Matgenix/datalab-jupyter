@@ -5,7 +5,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
+from urllib.parse import quote
 
 import httpx
 import nbformat
@@ -13,6 +13,8 @@ from jupyter_core.utils import ensure_async
 from jupyter_server.base.handlers import JupyterHandler
 from jupyter_server.utils import url_path_join
 from tornado import web
+
+from datalab_jupyter.urls import redact_query_parameter
 
 _BANNER_PATH = Path.home() / ".local" / "share" / "datalab-jupyter" / "banner.html"
 _EXCHANGE_PATH = "/v0.1/tools/jupyter/selection/exchange"
@@ -22,15 +24,7 @@ _MAX_ITEMS = 20
 
 def _redact_launch_code(handler: JupyterHandler) -> None:
     """Remove the one-time code from the URI used by the access log."""
-    parts = urlsplit(handler.request.uri)
-    safe_query = urlencode(
-        [
-            (key, value)
-            for key, value in parse_qsl(parts.query, keep_blank_values=True)
-            if key != "notebook_launch_code"
-        ]
-    )
-    handler.request.uri = urlunsplit(("", "", parts.path, safe_query, ""))
+    handler.request.uri = redact_query_parameter(handler.request.uri, "notebook_launch_code")
 
 
 async def _exchange_selection(code: str) -> tuple[str, ...]:

@@ -8,17 +8,17 @@ dynamic = ["version"]
 description = "datalab tool integration for JupyterHub and Jupyter user servers"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.10"
+requires-python = ">=3.11,<3.12"
 authors = [{ name = "datalab development team", email = "dev@datalab-org.io" }]
 dependencies = []
 
 [project.optional-dependencies]
 plugin = []
-hub = ["httpx>=0.28,<0.29", "jupyterhub>=5.5,<6"]
+hub = ["httpx>=0.28,<0.29", "jupyterhub>=5.5,<5.6"]
 server = [
     "datalab-api>=0.5,<0.6",
     "httpx>=0.28,<0.29",
-    "jupyterhub>=5.5,<6",
+    "jupyterhub>=5.5,<5.6",
     "jupyter-server>=2.17,<3",
     "nbformat>=5.10,<6",
 ]
@@ -52,17 +52,24 @@ fallback_version = "0.1.0"
 version_scheme = "post-release"
 
 [tool.uv.sources]
-datalab-server = { git = "https://github.com/datalab-org/datalab.git", subdirectory = "pydatalab" }
+datalab-server = { git = "https://github.com/Matgenix/datalab.git", branch = "dw/tools_plugins_nojupyter", subdirectory = "pydatalab" }
 
 [dependency-groups]
 dev = [
     "pre-commit>=4,<5",
 ]
-plugin-dev = ["datalab-server[server]; python_version >= '3.11'"]
+plugin-dev = ["datalab-server[server]"]
+
+[tool.mypy]
+follow_imports = "skip"
+ignore_missing_imports = true
+python_version = "3.11"
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "Q", "W"]
+select = ["E", "F", "I", "Q", "W", "DTZ", "S", "G"]
+ignore = ["E501", "E402"]
+per-file-ignores = { "tests/*" = ["S101"], "jupyterhub_config.py" = ["S104", "S105"], "src/datalab_jupyter/kernel/bootstrap.py" = ["S606", "S607"] }

@@ -1,9 +1,10 @@
 """Authenticate JupyterHub users with single-use datalab tool launch grants."""
 
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlencode
 
 import httpx
 from jupyterhub.auth import Authenticator
@@ -11,6 +12,8 @@ from jupyterhub.handlers.login import LoginHandler
 from jupyterhub.utils import url_path_join
 from tornado import web
 from traitlets import Unicode
+
+from datalab_jupyter.urls import redact_query_parameter
 
 EXCHANGE_PATH = "/v0.1/tools/plugins/jupyter/exchange"
 
@@ -30,6 +33,66 @@ def _is_expired(value: str) -> bool:
     return _expiration(value) <= datetime.now(timezone.utc)
 
 
+@dataclass(frozen=True)
+class _ExchangeResponse:
+    user_id: str
+    display_name: str | None
+    role: str
+    group_ids: tuple[str, ...]
+    tool_access_token: str
+    expires_at: str
+    notebook_launch_code: str | None = None
+
+    @classmethod
+    def from_payload(cls, payload: Any) -> "_ExchangeResponse":
+        if not isinstance(payload, dict):
+            raise ValueError("response must be an object")
+        required = {
+            "user_id",
+            "display_name",
+            "role",
+            "group_ids",
+            "tool_access_token",
+            "expires_at",
+        }
+        if not required.issubset(payload):
+            raise ValueError("response omitted required fields")
+
+        user_id = payload["user_id"]
+        display_name = payload["display_name"]
+        role = payload["role"]
+        group_ids = payload["group_ids"]
+        tool_access_token = payload["tool_access_token"]
+        expires_at = payload["expires_at"]
+        notebook_launch_code = payload.get("notebook_launch_code")
+        if (
+            not isinstance(user_id, str)
+            or not user_id
+            or display_name is not None
+            and not isinstance(display_name, str)
+            or not isinstance(role, str)
+            or not role
+            or not isinstance(group_ids, list)
+            or not all(isinstance(group_id, str) for group_id in group_ids)
+            or not isinstance(tool_access_token, str)
+            or not tool_access_token
+            or not isinstance(expires_at, str)
+            or notebook_launch_code is not None
+            and (not isinstance(notebook_launch_code, str) or not notebook_launch_code)
+        ):
+            raise ValueError("response contained invalid fields")
+        _expiration(expires_at)
+        return cls(
+            user_id=user_id,
+            display_name=display_name,
+            role=role,
+            group_ids=tuple(group_ids),
+            tool_access_token=tool_access_token,
+            expires_at=expires_at,
+            notebook_launch_code=notebook_launch_code,
+        )
+
+
 class DatalabLoginHandler(LoginHandler):
     """Always exchange a fresh launch code, even when a Hub cookie exists."""
 
@@ -45,15 +108,7 @@ class DatalabLoginHandler(LoginHandler):
         # the single-use launch code available only in memory while redacting it
         # from that log representation.
         self._datalab_launch_code = code
-        parts = urlsplit(self.request.uri)
-        safe_query = urlencode(
-            [
-                (key, value)
-                for key, value in parse_qsl(parts.query, keep_blank_values=True)
-                if key != "datalab_launch_code"
-            ]
-        )
-        self.request.uri = urlunsplit(("", "", parts.path, safe_query, ""))
+        self.request.uri = redact_query_parameter(self.request.uri, "datalab_launch_code")
         self.set_header("Cache-Control", "no-store")
         self.set_header("Referrer-Policy", "no-referrer")
 
@@ -129,64 +184,31 @@ class DatalabAuthenticator(Authenticator):
             self.log.error("Invalid datalab launch code exchange response: %s", exc)
             raise web.HTTPError(502, "datalab returned an invalid authentication response") from exc
 
-        required_fields = {
-            "user_id",
-            "display_name",
-            "role",
-            "group_ids",
-            "tool_access_token",
-            "expires_at",
-        }
-        if not isinstance(payload, dict) or not required_fields.issubset(payload):
-            self.log.error("datalab launch response omitted required fields")
-            raise web.HTTPError(502, "datalab returned an incomplete authentication response")
-
-        user_id = payload["user_id"]
-        username = f"datalab-{user_id}"
-        tool_access_token = payload["tool_access_token"]
-        role = payload["role"]
-        display_name = payload["display_name"]
-        group_ids = payload["group_ids"]
-        expires_at = payload["expires_at"]
-        notebook_launch_code = payload.get("notebook_launch_code")
-        if (
-            not isinstance(user_id, str)
-            or not user_id
-            or not isinstance(tool_access_token, str)
-            or not tool_access_token
-            or not isinstance(role, str)
-            or not role
-            or display_name is not None
-            and not isinstance(display_name, str)
-            or not isinstance(group_ids, list)
-            or not all(isinstance(group_id, str) for group_id in group_ids)
-            or not isinstance(expires_at, str)
-            or notebook_launch_code is not None
-            and (not isinstance(notebook_launch_code, str) or not notebook_launch_code)
-        ):
-            raise web.HTTPError(502, "datalab returned invalid authentication data")
         try:
-            if _is_expired(expires_at):
-                return None
+            exchange = _ExchangeResponse.from_payload(payload)
         except ValueError as exc:
-            raise web.HTTPError(502, "datalab returned an invalid expiration") from exc
+            self.log.error("Invalid datalab launch response: %s", exc)
+            raise web.HTTPError(502, "datalab returned invalid authentication data") from exc
+        if _is_expired(exchange.expires_at):
+            return None
 
         api_url = self.api_url.rstrip("/")
+        username = f"datalab-{exchange.user_id}"
         current_user = {
-            "id": user_id,
+            "id": exchange.user_id,
             "username": username,
-            "display_name": display_name,
-            "role": role,
-            "group_ids": group_ids,
+            "display_name": exchange.display_name,
+            "role": exchange.role,
+            "group_ids": list(exchange.group_ids),
         }
         auth_state = {
-            "tool_access_token": tool_access_token,
+            "tool_access_token": exchange.tool_access_token,
             "api_url": api_url,
             "current_user": current_user,
-            "expires_at": expires_at,
+            "expires_at": exchange.expires_at,
         }
-        if notebook_launch_code is not None:
-            auth_state["notebook_launch_code"] = notebook_launch_code
+        if exchange.notebook_launch_code is not None:
+            auth_state["notebook_launch_code"] = exchange.notebook_launch_code
 
         return {
             "name": username,
