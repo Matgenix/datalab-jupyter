@@ -16,4 +16,8 @@ Installing the plugin does not itself start JupyterHub. For the managed deployme
 Datalab's Compose file with
 [`deployment/docker-compose.datalab.yml`](deployment/docker-compose.datalab.yml). See the README
 for the complete Compose command, configuration, unsafe-HTTP warning, and managed-image
-instructions.
+instructions. Production use requires `DATALAB_JUPYTER_IMAGE_REPOSITORY` and
+`DATALAB_JUPYTER_IMAGE_DIGEST` to construct a reviewed image's immutable
+`repository@sha256:digest` reference; the companion file does not build remote source code. Local
+development may instead explicitly set `DATALAB_JUPYTER_UNPINNED_IMAGE` after building the selected
+checkout.
