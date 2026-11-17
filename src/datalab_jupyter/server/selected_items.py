@@ -14,17 +14,12 @@ from jupyter_server.base.handlers import JupyterHandler
 from jupyter_server.utils import url_path_join
 from tornado import web
 
-from datalab_jupyter.urls import redact_query_parameter
+from datalab_jupyter.fragment_post import render_fragment_post
 
 _BANNER_PATH = Path.home() / ".local" / "share" / "datalab-jupyter" / "banner.html"
 _EXCHANGE_PATH = "/v0.1/tools/jupyter/selection/exchange"
 _ACTION_ID = "open-in-notebook"
 _MAX_ITEMS = 20
-
-
-def _redact_launch_code(handler: JupyterHandler) -> None:
-    """Remove the one-time code from the URI used by the access log."""
-    handler.request.uri = redact_query_parameter(handler.request.uri, "notebook_launch_code")
 
 
 async def _exchange_selection(code: str) -> tuple[str, ...]:
@@ -222,11 +217,18 @@ class SelectedItemsHandler(JupyterHandler):
 
     @web.authenticated
     async def get(self) -> None:
-        code = (self.get_argument("notebook_launch_code", None) or "").strip()
+        """Render the authenticated fragment-to-POST bootstrap."""
+
+        self.finish(render_fragment_post(self, "notebook_launch_code"))
+
+    @web.authenticated
+    async def post(self) -> None:
+        """Exchange a body-only launch code and create the selected-items notebook."""
+
+        code = (self.get_body_argument("notebook_launch_code", None) or "").strip()
         if not code:
             raise web.HTTPError(403, "Invalid or expired notebook launch code")
 
-        _redact_launch_code(self)
         self.set_header("Cache-Control", "no-store")
         self.set_header("Referrer-Policy", "no-referrer")
 

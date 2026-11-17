@@ -13,7 +13,7 @@ from pydatalab.tools import (
     ToolMetadata,
     ToolProvider,
     ToolRouteAuth,
-    exchange_launch_code,
+    exchange_service_launch_code,
     issue_tool_selection_code,
 )
 
@@ -32,7 +32,7 @@ def _distribution_version() -> str:
 def _login_url(code: str, settings: PluginSettings) -> str:
     base_url = settings.browser_url(CONFIG.APP_URL)
     login_url = f"{base_url.rstrip('/')}/hub/datalab-login"
-    return f"{login_url}?{urlencode({'datalab_launch_code': code})}"
+    return f"{login_url}#{urlencode({'datalab_launch_code': code})}"
 
 
 class JupyterToolProvider(ToolProvider):
@@ -87,7 +87,7 @@ def exchange_jupyter_launch_code():
         return jsonify({"status": "error", "message": "A launch code is required"}), 400
 
     settings = load_plugin_settings()
-    exchange = exchange_launch_code(code, JupyterToolProvider.id, settings.client_id)
+    exchange = exchange_service_launch_code(code, JupyterToolProvider.id, settings.client_id)
     if exchange is None:
         return jsonify({"status": "error", "message": "Invalid or expired launch code"}), 400
 

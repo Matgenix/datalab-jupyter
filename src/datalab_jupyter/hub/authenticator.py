@@ -13,7 +13,7 @@ from jupyterhub.utils import url_path_join
 from tornado import web
 from traitlets import Unicode
 
-from datalab_jupyter.urls import redact_query_parameter
+from datalab_jupyter.fragment_post import render_fragment_post
 
 EXCHANGE_PATH = "/v0.1/tools/plugins/jupyter/exchange"
 
@@ -97,42 +97,115 @@ class DatalabLoginHandler(LoginHandler):
     """Always exchange a fresh launch code, even when a Hub cookie exists."""
 
     async def get(self) -> None:
-        """Authenticate from the launch URL and replace any previous Hub identity."""
+        """Render the credential-free fragment-to-POST bootstrap."""
+
+        self.finish(render_fragment_post(self, "datalab_launch_code"))
+
+    async def post(self) -> None:
+        """Authenticate from a launch code submitted in the XSRF-protected body."""
 
         self.statsd.incr("login.request")
-        code = (self.get_argument("datalab_launch_code", None) or "").strip()
+        code = (self.get_body_argument("datalab_launch_code", None) or "").strip()
         if not code:
             raise web.HTTPError(403, "Invalid or expired datalab launch code")
 
-        # Tornado's access log uses request.uri after the handler completes. Keep
-        # the single-use launch code available only in memory while redacting it
-        # from that log representation.
-        self._datalab_launch_code = code
-        self.request.uri = redact_query_parameter(self.request.uri, "datalab_launch_code")
+        await self._authenticate_and_redirect(code)
+
+    async def _authenticate_and_redirect(self, code: str) -> None:
+        """Exchange one code, refresh the user server, and complete the handoff."""
+
         self.set_header("Cache-Control", "no-store")
         self.set_header("Referrer-Policy", "no-referrer")
-
-        user = await self.login_user()
+        self._datalab_launch_code = code
+        try:
+            user = await self.login_user()
+        finally:
+            del self._datalab_launch_code
         if user is None:
             raise web.HTTPError(403, "Invalid or expired datalab launch code")
 
-        next_url = self.get_next_url(user)
         auth_state = await user.get_auth_state()
         notebook_launch_code = auth_state.get("notebook_launch_code") if auth_state else None
+        needs_selected_items_server = bool(
+            isinstance(notebook_launch_code, str) and notebook_launch_code
+        )
+        await self._ensure_fresh_server(user, required=needs_selected_items_server)
+        next_url = self.get_next_url(user)
         if isinstance(notebook_launch_code, str) and notebook_launch_code:
-            spawner = user.spawners[""]
-            if not spawner.ready:
-                if not spawner.pending:
-                    await self.spawn_single_user(user)
-                if spawner._spawn_future is not None:
-                    await spawner._spawn_future
-                if not spawner.ready:
-                    raise web.HTTPError(503, "The Jupyter server did not become ready")
             next_url = (
-                f"{url_path_join(user.url, 'datalab/open-selected')}?"
+                f"{url_path_join(user.url, 'datalab/open-selected')}#"
                 f"{urlencode({'notebook_launch_code': notebook_launch_code})}"
             )
         self.redirect(next_url, permanent=False)
+
+    async def _ensure_fresh_server(self, user: Any, *, required: bool) -> None:
+        """Replace an existing server so it receives the newly saved auth state."""
+
+        spawner = user.spawners[""]
+        replace_server = bool(spawner.active)
+        pending = spawner.pending
+
+        if pending == "spawn":
+            await self._await_server_future(
+                spawner._spawn_future,
+                "The existing Jupyter server did not finish starting",
+            )
+            if not spawner.ready:
+                raise web.HTTPError(503, "The existing Jupyter server did not become ready")
+        elif pending == "stop":
+            await self._await_server_future(
+                spawner._stop_future,
+                "The existing Jupyter server did not finish stopping",
+            )
+            await self._verify_server_stopped(spawner)
+        elif pending:
+            raise web.HTTPError(503, "The existing Jupyter server is busy")
+
+        if replace_server and spawner.ready:
+            try:
+                stop_future = await self.stop_single_user(user)
+            except Exception as exc:
+                raise web.HTTPError(503, "Unable to stop the existing Jupyter server") from exc
+            await self._await_server_future(
+                stop_future,
+                "The existing Jupyter server did not finish stopping",
+            )
+            await self._verify_server_stopped(spawner)
+
+        if replace_server or required:
+            try:
+                await self.spawn_single_user(user)
+                replacement_spawner = user.spawners[""]
+                if replacement_spawner._spawn_future is not None:
+                    await replacement_spawner._spawn_future
+            except Exception as exc:
+                raise web.HTTPError(503, "Unable to start the fresh Jupyter server") from exc
+            if not replacement_spawner.ready:
+                raise web.HTTPError(503, "The fresh Jupyter server did not become ready")
+
+    @staticmethod
+    async def _await_server_future(future: Any, failure_message: str) -> None:
+        """Await a Hub lifecycle future and normalize failures for the launch flow."""
+
+        if future is None:
+            raise web.HTTPError(503, failure_message)
+        try:
+            await future
+        except Exception as exc:
+            raise web.HTTPError(503, failure_message) from exc
+
+    @staticmethod
+    async def _verify_server_stopped(spawner: Any) -> None:
+        """Fail closed unless the previous server process has actually stopped."""
+
+        if spawner.active:
+            raise web.HTTPError(503, "The existing Jupyter server did not stop")
+        try:
+            status = await spawner.poll()
+        except Exception as exc:
+            raise web.HTTPError(503, "Unable to verify that the Jupyter server stopped") from exc
+        if status is None:
+            raise web.HTTPError(503, "The existing Jupyter server is still running")
 
 
 class DatalabAuthenticator(Authenticator):

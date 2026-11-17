@@ -28,6 +28,30 @@ token in encrypted JupyterHub `auth_state`, and injects it only into the matchin
 user server. The user server preloads an authenticated `DatalabClient` and can
 create a notebook from items selected in datalab.
 
+The provider's exchange endpoint uses datalab's explicitly unbound
+`exchange_service_launch_code()` API only after the provider route has verified
+the configured client ID and secret with HTTP Basic authentication. The helper
+does not authenticate its caller; the service-route guard and constant-time
+credential checks are therefore part of the security boundary.
+
+Both browser handoffs keep their short-lived launch codes in URL fragments,
+which browsers do not send in HTTP request targets. A credential-free,
+same-origin bootstrap removes the fragment from browser history and submits the
+code in an XSRF-protected POST body. There is no query-string compatibility
+path, so the provider, Hub, and single-user extension must be upgraded
+atomically. HTTPS remains required, and proxies must not log request bodies.
+
+A successful relaunch replaces an existing user server so the new container
+receives the freshly delegated datalab token. Files in the persistent work
+volume survive, but running kernels, terminals, processes, and unsaved in-memory
+state do not. External Hub deployments must provide the same restart behavior
+or an equivalent secure token-refresh mechanism.
+
+Release this restart behavior before or atomically with datalab's
+revoke-on-relaunch delegated-session policy. The core policy must not be
+deployed first because it would invalidate the credential held by a reused
+container without installing its replacement.
+
 ## Install the datalab tool plugin
 
 For a checkout beside the datalab repository, add the following to datalab's
@@ -137,8 +161,10 @@ is normally `http://localhost:8000/jupyter/`.
 In production, set `PYDATALAB_APP_URL` to the canonical frontend URL and proxy its `/jupyter/` path
 to the Hub, or set `DATALAB_JUPYTER_PUBLIC_URL` to another browser-facing HTTPS URL. The reverse
 proxy must preserve the path prefix and forwarded host and protocol information, support WebSocket
-upgrades and long-lived kernel connections, terminate TLS, and omit or redact
-`datalab_launch_code` values from access logs.
+upgrades and long-lived kernel connections, terminate TLS, and avoid request-body logging. Launch
+credentials are carried in browser fragments and same-origin POST bodies, so ordinary access logs
+should contain only the credential-free `/hub/datalab-login` and
+`/user/<name>/datalab/open-selected` paths. Verify this after deployment through the real proxy.
 
 ### Security, networking, and storage
 
@@ -152,14 +178,34 @@ receives it. User containers receive no Docker socket, MongoDB credentials, Flas
 bind mounts, or shared client secret. Each receives only its user's temporary tool token,
 current-user snapshot, API URL, and persistent work volume.
 
-The managed defaults are 2 CPU cores and 4 GiB of memory per user server, shutdown after one hour
-of inactivity, and a maximum server age of 24 hours. Override these with
-`DATALAB_JUPYTER_CPU_LIMIT`, `DATALAB_JUPYTER_MEM_LIMIT`, `DATALAB_JUPYTER_START_TIMEOUT`,
-`DATALAB_JUPYTER_IDLE_TIMEOUT`, and `DATALAB_JUPYTER_MAX_AGE`.
+The managed defaults are 2 CPU cores, 4 GiB of memory, and at most 512 processes per user server,
+shutdown after one hour of inactivity, and a maximum server age of 24 hours. Every user container
+runs as the non-root `1000:100` user, drops all Linux capabilities, and enables
+`no-new-privileges`. Override the resource and lifetime settings with
+`DATALAB_JUPYTER_CPU_LIMIT`, `DATALAB_JUPYTER_MEM_LIMIT`, `DATALAB_JUPYTER_PIDS_LIMIT`,
+`DATALAB_JUPYTER_START_TIMEOUT`, `DATALAB_JUPYTER_IDLE_TIMEOUT`, and
+`DATALAB_JUPYTER_MAX_AGE`. The PID limit must be between 1 and 65,536; validate a non-default value
+against representative scientific kernels before production use.
 
 Hub state and encrypted authentication data use a persistent volume. Stopping a user server
-removes its disposable container while retaining its work volume. Administrators should define
-storage quotas and a volume-retention policy suitable for their deployment.
+removes its disposable container while retaining its work volume. Docker's local named-volume
+driver does not provide a portable per-volume quota. Before production use, operators must place
+Docker's user-volume storage on a dedicated, size-bounded or quota-backed filesystem or volume
+driver, monitor its free space, configure alerts, and define a volume-retention policy. This bounds
+the deployment's total storage consumption; it does not stop one user from filling the shared
+backing store. Deployments that require hard per-user quotas must use external storage or an
+orchestrator that can enforce one quota per user, such as per-user persistent volumes with storage
+quotas.
+
+The managed Compose profile is supported only for authenticated users within one organizational
+trust domain. User containers share the tools bridge and can reach other members of that bridge,
+including peer user servers, unless the destination service enforces its own authentication. The
+portable container controls above reduce privilege and resource-exhaustion risk but do not provide
+hostile multi-tenant storage or network isolation. Mutually untrusted users require an external
+JupyterHub or orchestrator with enforceable per-user storage quotas and NetworkPolicy or equivalent
+firewall controls. Production approval of the managed profile must record acceptance of the
+remaining shared-storage and shared-network risk as well as the Hub's effective host-root access
+through the Docker socket.
 
 ## Configure an external JupyterHub
 
@@ -223,7 +269,7 @@ The image expects `DATALAB_JUPYTER_API_URL`, `DATALAB_JUPYTER_CLIENT_ID`,
 Optional settings include `DATALAB_JUPYTER_PUBLIC_URL`,
 `DATALAB_JUPYTER_ALLOW_INSECURE_HTTP`,
 `DATALAB_JUPYTER_CONNECT_IP`, `DATALAB_JUPYTER_CPU_LIMIT`,
-`DATALAB_JUPYTER_MEM_LIMIT`, `DATALAB_JUPYTER_START_TIMEOUT`,
+`DATALAB_JUPYTER_MEM_LIMIT`, `DATALAB_JUPYTER_PIDS_LIMIT`, `DATALAB_JUPYTER_START_TIMEOUT`,
 `DATALAB_JUPYTER_IDLE_TIMEOUT`, and `DATALAB_JUPYTER_MAX_AGE`.
 
 The volume prefix is also used as DockerSpawner's container prefix. This keeps spawned notebook

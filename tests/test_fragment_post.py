@@ -1,0 +1,48 @@
+import re
+from types import SimpleNamespace
+from unittest import TestCase
+
+from datalab_jupyter.fragment_post import render_fragment_post
+
+
+class _Handler:
+    xsrf_token = b"test-xsrf-token"
+
+    def __init__(self):
+        self.request = SimpleNamespace(path="/hub/datalab-login")
+        self.headers = {}
+
+    def set_header(self, name, value):
+        self.headers[name] = value
+
+
+class FragmentPostTests(TestCase):
+    def test_bootstrap_posts_one_fragment_field_with_xsrf_and_strict_headers(self):
+        handler = _Handler()
+
+        page = render_fragment_post(handler, "datalab_launch_code")
+
+        self.assertIn('method="post" action="/hub/datalab-login"', page)
+        self.assertIn('name="_xsrf" value="test-xsrf-token"', page)
+        self.assertIn('name="datalab_launch_code" value=""', page)
+        self.assertIn('const expectedField = "datalab_launch_code";', page)
+        self.assertIn("entries.length !== 1", page)
+        self.assertIn("entries[0][0] !== expectedField", page)
+        self.assertIn("decodeURIComponent", page)
+        self.assertIn("history.replaceState", page)
+        self.assertLess(page.index("history.replaceState"), page.index("new URLSearchParams"))
+        self.assertNotIn("test-launch-credential", page)
+        self.assertEqual(handler.headers["Cache-Control"], "no-store")
+        self.assertEqual(handler.headers["Referrer-Policy"], "no-referrer")
+
+        nonce_match = re.search(r'<script nonce="([^"]+)">', page)
+        self.assertIsNotNone(nonce_match)
+        self.assertIn(
+            f"script-src 'nonce-{nonce_match.group(1)}'",
+            handler.headers["Content-Security-Policy"],
+        )
+        self.assertIn("form-action 'self'", handler.headers["Content-Security-Policy"])
+
+    def test_bootstrap_rejects_an_invalid_field_name(self):
+        with self.assertRaises(ValueError):
+            render_fragment_post(_Handler(), "unexpected-field")

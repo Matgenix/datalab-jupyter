@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Harden managed user containers with a validated PID limit, a complete Linux capability drop,
+  and `no-new-privileges`. Document that managed Compose is a trusted-user profile whose shared
+  bridge and named-volume backing storage do not provide hostile multi-tenant isolation.
+- Keep Hub and selected-items launch credentials out of HTTP request targets by
+  moving both handoffs to same-origin, XSRF-protected fragment-to-POST
+  bootstraps. All three integration components now require an atomic upgrade.
+- Replace an existing user server after every successful relaunch so its
+  environment receives the newly delegated datalab token, while preserving
+  files in the persistent work volume. Release this before or atomically with
+  datalab's revoke-on-relaunch delegated-session policy.
+- Use the explicitly service-only launch-code exchange API after authenticating
+  the JupyterHub client, avoiding accidental browser-style cross-user exchange.
 - Require managed deployments to provide a reviewed, digest-pinned Jupyter image instead of
   building the mutable remote default branch. The companion Compose configuration now fails
   closed unless both production image components are set or the explicit, non-production

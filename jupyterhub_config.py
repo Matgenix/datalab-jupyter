@@ -11,6 +11,8 @@ from datalab_jupyter.urls import configured_base_url
 
 c = get_config()
 
+MAX_PIDS_LIMIT = 65_536
+
 
 def required_environment(name: str) -> str:
     """Return a required, non-empty deployment setting."""
@@ -21,10 +23,25 @@ def required_environment(name: str) -> str:
     return value
 
 
+def positive_integer_environment(name: str, default: int, maximum: int) -> int:
+    """Return a bounded positive-integer deployment setting."""
+
+    value = os.environ.get(name, str(default)).strip()
+    if not value.isascii() or not value.isdigit():
+        raise RuntimeError(f"{name} must be a positive integer")
+    parsed_value = int(value)
+    if parsed_value < 1 or parsed_value > maximum:
+        raise RuntimeError(f"{name} must be between 1 and {maximum}")
+    return parsed_value
+
+
 base_url = configured_base_url()
 network_name = required_environment("DATALAB_JUPYTER_DOCKER_NETWORK")
 volume_prefix = required_environment("DATALAB_JUPYTER_VOLUME_PREFIX")
 client_secret = required_environment("DATALAB_JUPYTER_CLIENT_SECRET")
+pids_limit = positive_integer_environment(
+    "DATALAB_JUPYTER_PIDS_LIMIT", default=512, maximum=MAX_PIDS_LIMIT
+)
 if not os.environ.get("JUPYTERHUB_CRYPT_KEY", "").strip():
     key_material = f"datalab-jupyter-auth-state:{client_secret}".encode()
     os.environ["JUPYTERHUB_CRYPT_KEY"] = hashlib.sha256(key_material).hexdigest()
@@ -62,6 +79,11 @@ c.DockerSpawner.volumes = {
 c.DockerSpawner.extra_create_kwargs = {
     "user": "1000:100",
     "working_dir": "/home/jovyan/work",
+}
+c.DockerSpawner.extra_host_config = {
+    "pids_limit": pids_limit,
+    "cap_drop": ["ALL"],
+    "security_opt": ["no-new-privileges:true"],
 }
 
 c.Spawner.default_url = "/lab"
