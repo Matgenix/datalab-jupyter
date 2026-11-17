@@ -57,6 +57,7 @@ datalab-server = { git = "https://github.com/Matgenix/datalab.git", branch = "dw
 [dependency-groups]
 dev = [
     "pre-commit>=4,<5",
+    "pytest>=8,<9",
 ]
 plugin-dev = ["datalab-server[server]"]
 
