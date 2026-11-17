@@ -1,313 +1,114 @@
 # datalab-jupyter
 
-`datalab-jupyter` connects the datalab Tools framework to JupyterHub and to the
-Jupyter user environments started by that Hub. It is one Python distribution
-with independently installable components; it is not a JupyterLab frontend
+`datalab-jupyter` connects datalab's Tools framework to JupyterHub and to the
+Jupyter user environments started by that Hub. It is not a JupyterLab frontend
 extension.
 
-The datalab documentation describes the generic
-[standalone-tool contract](https://docs.datalab-org.io/en/latest/plugin-development/standalone-tool-plugin/).
-This repository owns the Jupyter-specific installation, deployment, and operations guidance.
+- **Users:** follow [Using JupyterLab](#using-jupyterlab) below.
+- **Deployment administrators:** follow [INSTALL.md](INSTALL.md) for the managed
+  Compose path, external JupyterHub alternative, configuration, upgrades, and
+  security boundaries.
+- **Developers:** see [Development](#development) and datalab's generic
+  [standalone tool guide](https://docs.datalab-org.io/en/latest/plugin-development/standalone-tool-plugin/).
 
-## Components
+## Using JupyterLab
 
-- `datalab-jupyter[plugin]` installs the concrete `jupyter` tool provider in a
-  datalab API environment.
-- `datalab-jupyter[hub]` installs the datalab JupyterHub authenticator.
-- `datalab-jupyter[server]` installs the Jupyter Server and IPython integration
-  in each single-user environment.
+### Open a working environment
 
-The host datalab installation supplies the provider's core API; the
-`plugin-dev` dependency group supplies it for isolated development. Since both
-datalab and JupyterHub use Pydantic 2, that development group can be installed
-alongside the Hub and server extras when one environment needs all components.
-
-The tool provider asks datalab core for a one-use launch grant. The Hub exchanges
-that grant with its client credentials, stores the resulting temporary tool
-token in encrypted JupyterHub `auth_state`, and injects it only into the matching
-user server. The user server preloads an authenticated `DatalabClient` and can
-create a notebook from items selected in datalab.
-
-The provider's exchange endpoint uses datalab's explicitly unbound
-`exchange_service_launch_code()` API only after the provider route has verified
-the configured client ID and secret with HTTP Basic authentication. The helper
-does not authenticate its caller; the service-route guard and constant-time
-credential checks are therefore part of the security boundary.
-
-Both browser handoffs keep their short-lived launch codes in URL fragments,
-which browsers do not send in HTTP request targets. A credential-free,
-same-origin bootstrap removes the fragment from browser history and submits the
-code in an XSRF-protected POST body. There is no query-string compatibility
-path, so the provider, Hub, and single-user extension must be upgraded
-atomically. HTTPS remains required, and proxies must not log request bodies.
-
-A successful relaunch replaces an existing user server so the new container
-receives the freshly delegated datalab token. Files in the persistent work
-volume survive, but running kernels, terminals, processes, and unsaved in-memory
-state do not. External Hub deployments must provide the same restart behavior
-or an equivalent secure token-refresh mechanism.
-
-Release this restart behavior before or atomically with datalab's
-revoke-on-relaunch delegated-session policy. The core policy must not be
-deployed first because it would invalidate the credential held by a reused
-container without installing its replacement.
-
-## Install the datalab tool plugin
-
-For a checkout beside the datalab repository, add the following to datalab's
-ignored root `plugins.toml`:
-
-```toml
-dependencies = ["datalab-jupyter[plugin]"]
-
-[tool.uv.sources]
-datalab-jupyter = { path = "dev-repos/datalab-jupyter", editable = true }
-```
-
-Then run `uv run invoke dev.install` from `pydatalab/`. A production deployment
-should replace the path source with a versioned Git or package source.
-
-The provider requires:
-
-```shell
-export DATALAB_JUPYTER_CLIENT_ID=datalab-jupyter
-export DATALAB_JUPYTER_CLIENT_SECRET='<at least 32 characters>'
-```
-
-Set `DATALAB_JUPYTER_EXTERNAL_URL` for an independently deployed Hub, or
-`DATALAB_JUPYTER_PUBLIC_URL` to override the browser-facing URL of the managed
-Hub. If neither is set, the provider derives `/jupyter/` from the datalab
-application URL. Disable the installed tool with
-`PYDATALAB_TOOLS__DISABLED='["jupyter"]'`.
-
-Public and external URLs must use HTTPS unless they target a loopback address. For a trusted,
-temporary non-production deployment reached by plain HTTP, the Datalab API process may explicitly
-set `DATALAB_JUPYTER_ALLOW_INSECURE_HTTP=true`. The plugin reads this setting when it validates the
-public URL. This safety override is disabled by default and must not be used in production.
-It does not disable the launch-code exchange or replace `DATALAB_JUPYTER_CLIENT_ID` and
-`DATALAB_JUPYTER_CLIENT_SECRET`; both credentials remain required.
-
-## Deploy the managed JupyterHub with Datalab Compose
-
-Installing the Python plugin registers the tool in Datalab, but it does not start JupyterHub. A
-deployment that uses the managed Hub must also combine Datalab's Compose file with the companion
-file provided in this repository:
-
-[`deployment/docker-compose.datalab.yml`](deployment/docker-compose.datalab.yml)
-
-For checkouts of `datalab` and `datalab-jupyter` beside one another, run from the Datalab checkout:
-
-```shell
-export DATALAB_JUPYTER_IMAGE_REPOSITORY='registry.example/datalab-jupyter'
-export DATALAB_JUPYTER_IMAGE_DIGEST='sha256:<verified-digest>'
-docker compose \
-  --file docker-compose.yml \
-  --file ../datalab-jupyter/deployment/docker-compose.datalab.yml \
-  --profile prod up --detach
-```
-
-The example values are placeholders, not a usable image reference. Set the repository and the
-`sha256:...` digest reported by a trusted registry after reviewing and building the selected source
-revision. Compose joins them as `repository@digest`, so both values are required for the production
-path; Docker rejects a malformed digest reference before starting the container. The Hub image
-receives the Docker socket so that DockerSpawner can create user containers; possession of that
-socket is effectively host-root access. A tag alone, including a version tag or `latest`, is
-mutable and is not sufficient for production.
-
-By default, spawned user containers use the same image as the Hub. Set
-`DATALAB_JUPYTER_SINGLEUSER_IMAGE` only when a separate user image is required, and pin that image
-by digest in production as well.
-
-The companion file adds JupyterHub, its persistent data volume, and the private `tools` network. It
-also gives the Datalab API the `datalab-api` network alias used by JupyterHub. It does not install
-the API plugin; keep `datalab-jupyter[plugin]` in Datalab's `plugins.toml` as described above.
-
-Provide the shared client ID and secret to both the API and JupyterHub. The Hub's
-`DATALAB_JUPYTER_API_URL` must include Datalab's configured API root when it is not `/`. For
-example, use `http://datalab-api:5001/api` when `PYDATALAB_ROOT_PATH=/api`.
-
-The companion file deliberately does not enable or forward the unsafe HTTP option. If a trusted
-non-production deployment intentionally exposes Jupyter over plain HTTP, add a deployment-specific
-Compose override:
-
-```yaml
-services:
-  api:
-    environment:
-      - DATALAB_JUPYTER_ALLOW_INSECURE_HTTP
-```
-
-Then set `DATALAB_JUPYTER_ALLOW_INSECURE_HTTP=true` in the environment used by Compose. HTTPS or a
-loopback URL needs no such override.
-
-Use the same Compose files for later operations, including shutdown:
-
-```shell
-docker compose \
-  --file docker-compose.yml \
-  --file ../datalab-jupyter/deployment/docker-compose.datalab.yml \
-  --profile dev down
-```
-
-If the companion file is omitted from `down`, Compose does not know about the Hub service and may
-leave it running with the tools network still in use. Production and development profiles are
-alternatives and should not be run simultaneously. Docker Compose 2.20 or newer is required for
-the optional health-based API dependencies.
-
-The managed Hub binds to `127.0.0.1:8000` by default. Change this with
-`DATALAB_JUPYTER_BIND_ADDRESS` and `DATALAB_JUPYTER_PORT`. For loopback development, its browser URL
-is normally `http://localhost:8000/jupyter/`.
-
-In production, set `PYDATALAB_APP_URL` to the canonical frontend URL and proxy its `/jupyter/` path
-to the Hub, or set `DATALAB_JUPYTER_PUBLIC_URL` to another browser-facing HTTPS URL. The reverse
-proxy must preserve the path prefix and forwarded host and protocol information, support WebSocket
-upgrades and long-lived kernel connections, terminate TLS, and avoid request-body logging. Launch
-credentials are carried in browser fragments and same-origin POST bodies, so ordinary access logs
-should contain only the credential-free `/hub/datalab-login` and
-`/user/<name>/datalab/open-selected` paths. Verify this after deployment through the real proxy.
-
-### Security, networking, and storage
-
-The API, Hub, and spawned user servers share a dedicated tools network. The API uses the
-`datalab-api` alias, so notebooks can call it without joining the database network. MongoDB is not
-attached to the tools network; notebooks access data through the Datalab API and its current-user
-permission checks.
-
-DockerSpawner requires the Docker socket to create user containers. Only the reviewed Hub image
-receives it. User containers receive no Docker socket, MongoDB credentials, Flask secrets, host
-bind mounts, or shared client secret. Each receives only its user's temporary tool token,
-current-user snapshot, API URL, and persistent work volume.
-
-The managed defaults are 2 CPU cores, 4 GiB of memory, and at most 512 processes per user server,
-shutdown after one hour of inactivity, and a maximum server age of 24 hours. Every user container
-runs as the non-root `1000:100` user, drops all Linux capabilities, and enables
-`no-new-privileges`. Override the resource and lifetime settings with
-`DATALAB_JUPYTER_CPU_LIMIT`, `DATALAB_JUPYTER_MEM_LIMIT`, `DATALAB_JUPYTER_PIDS_LIMIT`,
-`DATALAB_JUPYTER_START_TIMEOUT`, `DATALAB_JUPYTER_IDLE_TIMEOUT`, and
-`DATALAB_JUPYTER_MAX_AGE`. The PID limit must be between 1 and 65,536; validate a non-default value
-against representative scientific kernels before production use.
-
-Hub state and encrypted authentication data use a persistent volume. Stopping a user server
-removes its disposable container while retaining its work volume. Docker's local named-volume
-driver does not provide a portable per-volume quota. Before production use, operators must place
-Docker's user-volume storage on a dedicated, size-bounded or quota-backed filesystem or volume
-driver, monitor its free space, configure alerts, and define a volume-retention policy. This bounds
-the deployment's total storage consumption; it does not stop one user from filling the shared
-backing store. Deployments that require hard per-user quotas must use external storage or an
-orchestrator that can enforce one quota per user, such as per-user persistent volumes with storage
-quotas.
-
-The managed Compose profile is supported only for authenticated users within one organizational
-trust domain. User containers share the tools bridge and can reach other members of that bridge,
-including peer user servers, unless the destination service enforces its own authentication. The
-portable container controls above reduce privilege and resource-exhaustion risk but do not provide
-hostile multi-tenant storage or network isolation. Mutually untrusted users require an external
-JupyterHub or orchestrator with enforceable per-user storage quotas and NetworkPolicy or equivalent
-firewall controls. Production approval of the managed profile must record acceptance of the
-remaining shared-storage and shared-network risk as well as the Hub's effective host-root access
-through the Docker socket.
-
-## Configure an external JupyterHub
-
-Install `[hub]` in the Hub environment and `[server]` in the single-user image.
-Configure the Hub with:
-
-```python
-from datalab_jupyter.hub import DatalabAuthenticator
-
-c.JupyterHub.authenticator_class = DatalabAuthenticator
-c.DatalabAuthenticator.api_url = "https://api.example.org"
-c.DatalabAuthenticator.client_id = "datalab-jupyter"
-c.DatalabAuthenticator.client_secret = "<the same deployment secret>"
-c.DatalabAuthenticator.enable_auth_state = True
-c.DatalabAuthenticator.allow_all = True
-c.DatalabAuthenticator.auto_login = True
-```
-
-Set a persistent `JUPYTERHUB_CRYPT_KEY`, and use
-`datalab-jupyter-singleuser` as the spawner command. The deployment owns its
-spawner, storage, TLS, resource limits, culling, and user image. User-server
-lifetimes must not exceed the delegated datalab session lifetime.
-
-Set `DATALAB_JUPYTER_EXTERNAL_URL` in the Datalab API and run the normal Datalab Compose file
-without this repository's companion file. The external administrator must isolate notebook
-containers from Datalab's database and server secrets. New Datalab users are created dynamically
-in JupyterHub on their first successful launch; a pre-provisioned user list is not required.
-
-## Managed image
-
-Before a production deployment, review an exact source revision and its Dockerfile, build it in a
-trusted environment, publish it to a trusted registry, and record the registry-reported digest.
-Configure the companion Compose file with that complete digest reference; it does not fetch or
-build source code. Supply the reference as `DATALAB_JUPYTER_IMAGE_REPOSITORY` and the
-registry-reported `DATALAB_JUPYTER_IMAGE_DIGEST`; Compose constructs the immutable reference.
-
-For local development, build only from the explicitly selected checkout, then configure Compose to
-use that local image:
-
-```shell
-cd /path/to/datalab-jupyter
-docker build --tag datalab-jupyter:dev .
-
-cd /path/to/datalab
-export DATALAB_JUPYTER_UNPINNED_IMAGE=datalab-jupyter:dev
-docker compose \
-  --file docker-compose.yml \
-  --file ../datalab-jupyter/deployment/docker-compose.datalab.yml \
-  --profile dev up --detach --build
-```
-
-`DATALAB_JUPYTER_UNPINNED_IMAGE` is an explicit non-production escape hatch: it acknowledges that
-the selected image is mutable and will receive the Docker socket. Never set it in production. The
-production repository and digest take precedence if both paths are configured. The remaining
-`--build` builds services that still have local build definitions in Datalab's main Compose file;
-the JupyterHub service itself is image-only.
-
-The image expects `DATALAB_JUPYTER_API_URL`, `DATALAB_JUPYTER_CLIENT_ID`,
-`DATALAB_JUPYTER_CLIENT_SECRET`, `DATALAB_JUPYTER_DOCKER_NETWORK`,
-`DATALAB_JUPYTER_VOLUME_PREFIX`, and `DATALAB_JUPYTER_SINGLEUSER_IMAGE`.
-Optional settings include `DATALAB_JUPYTER_PUBLIC_URL`,
-`DATALAB_JUPYTER_ALLOW_INSECURE_HTTP`,
-`DATALAB_JUPYTER_CONNECT_IP`, `DATALAB_JUPYTER_CPU_LIMIT`,
-`DATALAB_JUPYTER_MEM_LIMIT`, `DATALAB_JUPYTER_PIDS_LIMIT`, `DATALAB_JUPYTER_START_TIMEOUT`,
-`DATALAB_JUPYTER_IDLE_TIMEOUT`, and `DATALAB_JUPYTER_MAX_AGE`.
-
-The volume prefix is also used as DockerSpawner's container prefix. This keeps spawned notebook
-containers and their persistent work volumes within one deployment-specific namespace.
-
-## Notebook environment
-
-Each Python notebook and Jupyter console preloads:
+Sign in to datalab, click **Tools**, and choose **JupyterLab**. The Hub starts or
+replaces your user server and opens JupyterLab. Each Python notebook and Jupyter
+console preloads:
 
 ```python
 datalab  # authenticated datalab_api.DatalabClient
-current_user  # launch-time identity, role, and group snapshot
+current_user  # launch-time identity, effective role, and group snapshot
 ```
 
-JupyterLab also contributes **Open in notebook** to the selected-items menus for Samples,
-Inventory, Equipment, and items within a collection. Selecting 1–20 rows creates a notebook with a
-dedicated kernel and a visible initialization cell. Datalab passes only immutable refcodes; the
-cell retrieves the current item dictionaries through the permission-aware API and defines:
+Use `datalab` to access only the data available to your datalab account. The
+delegated role is always `user`, even when a datalab administrator launches the
+tool.
+
+### Open selected items in a notebook
+
+1. Select 1–20 rows in Samples, Inventory, Equipment, or the items in a
+   collection.
+2. Choose **Open in notebook** from the selected-items menu.
+3. Wait for JupyterLab to create a notebook with a dedicated kernel and run its
+   visible initialization cell.
+
+The cell defines:
 
 ```python
 selected_item_refcodes  # ordered immutable refcodes from the table
-selected_items  # accessible item dictionaries
+selected_items  # item dictionaries accessible to the current user
 selected_item_errors  # refcodes that could not be loaded
 ```
 
-The cell runs automatically once when the notebook is created and remains editable and rerunnable.
-It is not rerun automatically after a kernel restart. A normal JupyterLab launch from the Tools
-menu does not create a notebook or define these selection-specific variables.
+You can edit and rerun the cell. It does not run automatically after a kernel
+restart. A normal launch from **Tools** does not create a notebook or define
+these selection variables.
 
-The managed image includes SciPy, pandas, Matplotlib, seaborn, ipywidgets, lmfit, uncertainties,
-Pint, openpyxl, h5py, and tqdm. NumPy is installed as a dependency and constrained for
-compatibility with the pinned `datalab-api` client.
+### Sessions and files
+
+Launching JupyterLab again replaces your existing user server so the new server
+receives a fresh temporary datalab credential. Files in your persistent work
+volume survive; running kernels, terminals, processes, and unsaved in-memory
+state stop. Save work before relaunching.
+
+The managed image includes SciPy, pandas, Matplotlib, seaborn, ipywidgets,
+lmfit, uncertainties, Pint, openpyxl, h5py, tqdm, and a compatible NumPy.
+Deployment administrators may provide a different single-user image.
+
+If a datalab request reports HTTP 401, save your files and relaunch JupyterLab
+from datalab. Contact the deployment administrator if JupyterLab is absent from
+the complete Tools catalog or the Hub fails to start.
+
+## Integration overview
+
+The distribution has three independently installable components:
+
+- `datalab-jupyter[plugin]`: the concrete `jupyter` tool provider in the datalab
+  API environment;
+- `datalab-jupyter[hub]`: the datalab authenticator in JupyterHub; and
+- `datalab-jupyter[server]`: Jupyter Server and IPython integration in each user
+  environment.
+
+The provider issues a single-use launch grant. The Hub exchanges it with shared
+client credentials, stores the temporary datalab token in encrypted JupyterHub
+authentication state, and injects it only into the matching user server. Browser
+handoffs carry launch codes in URL fragments and submit them through
+same-origin, XSRF-protected POST requests.
+
+Provider, Hub, and server versions must be upgraded together. Installation does
+not itself start JupyterHub; the deployment chooses either the managed companion
+Compose file or a compatible external Hub. The complete operational and
+security contract is in [INSTALL.md](INSTALL.md).
 
 ## Development
 
+Install and test the provider separately when only the datalab integration is
+needed:
+
 ```shell
 uv sync --extra plugin --group plugin-dev --dev
+```
+
+Install the Hub and user-server integrations together when testing the full
+handoff:
+
+```shell
 uv sync --extra hub --extra server --dev
+```
+
+Run the repository checks and build the distribution:
+
+```shell
+uv run pytest
 uv run pre-commit run --all-files
 uv build
 ```
+
+The `plugin-dev` dependency group supplies the datalab core API for isolated
+provider development. Do not release one component independently: browser
+handoff and user-server lifecycle changes require an atomic version across the
+provider, Hub, and server extras.
