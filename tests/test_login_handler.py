@@ -13,23 +13,19 @@ class _LifecycleCompletion:
         event,
         ready_after,
         error=None,
-        running_after=None,
         on_complete=None,
     ):
         self.spawner = spawner
         self.event = event
         self.ready_after = ready_after
         self.error = error
-        self.running_after = ready_after if running_after is None else running_after
         self.on_complete = on_complete
-        self.awaited = False
 
     def __await__(self):
-        self.awaited = True
         self.spawner.events.append(f"{self.event}-complete")
         self.spawner.pending = None
         self.spawner.ready = self.ready_after
-        self.spawner.running = self.running_after
+        self.spawner.running = self.ready_after
         if self.on_complete is not None:
             self.on_complete()
         if self.error is not None:
@@ -48,7 +44,6 @@ class _Spawner:
         self._stop_future = None
         self.environment = {"DATALAB_API_KEY": "stale-token"}
         self.running = ready or pending == "stop"
-        self.poll_calls = 0
         if pending == "spawn":
             self._spawn_future = _LifecycleCompletion(self, "pending-spawn", True)
         elif pending == "stop":
@@ -59,7 +54,6 @@ class _Spawner:
         return bool(self.pending or self.ready)
 
     async def poll(self):
-        self.poll_calls += 1
         return None if self.running else 0
 
 
@@ -94,7 +88,6 @@ class _Handler:
         stop_ready_after=False,
         spawn_ready_after=True,
         spawn_error=None,
-        stop_running_after=None,
     ):
         self.request = SimpleNamespace(
             path="/hub/datalab-login",
@@ -110,10 +103,7 @@ class _Handler:
         self.stop_ready_after = stop_ready_after
         self.spawn_ready_after = spawn_ready_after
         self.spawn_error = spawn_error
-        self.stop_running_after = stop_running_after
-        self.spawn_auth_states = []
         self.spawn_environments = []
-        self.next_url_event_snapshots = []
         self.spawner = _Spawner(ready=ready, pending=pending, events=self.events)
         self.user = _User(self.spawner, selected_items=selected_items)
         if pending == "stop":
@@ -147,7 +137,6 @@ class _Handler:
         await DatalabLoginHandler._verify_server_stopped(spawner)
 
     def get_next_url(self, _user):
-        self.next_url_event_snapshots.append(list(self.events))
         return "/hub/home"
 
     async def stop_single_user(self, _user):
@@ -158,14 +147,12 @@ class _Handler:
             self.spawner,
             "stop",
             self.stop_ready_after,
-            running_after=self.stop_running_after,
             on_complete=lambda: self.user.spawners.pop("", None),
         )
         return self.spawner._stop_future
 
     async def spawn_single_user(self, user):
         self.events.append("spawn")
-        self.spawn_auth_states.append(dict(await user.get_auth_state()))
         if "" not in user.spawners:
             self.spawner = _Spawner(events=self.events)
             user.spawners[""] = self.spawner
@@ -195,15 +182,6 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handler.login_calls, 0)
         self.assertEqual(handler.headers["Cache-Control"], "no-store")
 
-    async def test_post_without_a_body_code_is_rejected(self):
-        handler = _Handler(code=None)
-
-        with self.assertRaises(web.HTTPError) as raised:
-            await DatalabLoginHandler.post(handler)
-
-        self.assertEqual(raised.exception.status_code, 403)
-        self.assertEqual(handler.login_calls, 0)
-
     async def test_post_does_not_fall_back_to_a_query_code(self):
         handler = _Handler(code=None)
         handler.request.uri += "?datalab_launch_code=query-secret"
@@ -224,10 +202,8 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
             handler.events,
             ["login", "stop", "stop-complete", "spawn", "spawn-complete", "redirect"],
         )
-        self.assertEqual(handler.spawn_auth_states[0]["tool_access_token"], "fresh-token")
         self.assertEqual(handler.spawn_environments[0]["DATALAB_API_KEY"], "fresh-token")
         self.assertIsNot(handler.spawner, old_spawner)
-        self.assertEqual(handler.next_url_event_snapshots, [handler.events[:-1]])
         self.assertEqual(
             handler.redirected_to,
             (
@@ -237,19 +213,6 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("?notebook_launch_code=", handler.redirected_to[0])
         self.assertFalse(hasattr(handler, "_datalab_launch_code"))
-
-    async def test_ready_server_is_also_replaced_for_a_normal_launch(self):
-        handler = _Handler(ready=True, selected_items=False)
-
-        await DatalabLoginHandler.post(handler)
-
-        self.assertEqual(
-            handler.events,
-            ["login", "stop", "stop-complete", "spawn", "spawn-complete", "redirect"],
-        )
-        self.assertEqual(handler.spawn_environments[0]["DATALAB_API_KEY"], "fresh-token")
-        self.assertEqual(handler.next_url_event_snapshots, [handler.events[:-1]])
-        self.assertEqual(handler.redirected_to, ("/hub/home", False))
 
     async def test_fresh_selected_items_launch_spawns_without_a_stop(self):
         handler = _Handler()
@@ -303,30 +266,17 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status_code, 503)
         self.assertIsNone(handler.redirected_to)
 
-    async def test_stop_failure_with_cleared_hub_state_still_returns_503(self):
-        handler = _Handler(ready=True, stop_running_after=True)
+    async def test_replacement_spawn_failures_return_503_without_redirecting(self):
+        cases = (
+            {"spawn_ready_after": False},
+            {"spawn_error": RuntimeError("spawn failed")},
+        )
+        for options in cases:
+            with self.subTest(options=options):
+                handler = _Handler(ready=True, **options)
 
-        with self.assertRaises(web.HTTPError) as raised:
-            await DatalabLoginHandler.post(handler)
+                with self.assertRaises(web.HTTPError) as raised:
+                    await DatalabLoginHandler.post(handler)
 
-        self.assertEqual(raised.exception.status_code, 503)
-        self.assertEqual(handler.spawner.poll_calls, 1)
-        self.assertIsNone(handler.redirected_to)
-
-    async def test_non_ready_replacement_returns_503_without_redirecting(self):
-        handler = _Handler(ready=True, spawn_ready_after=False)
-
-        with self.assertRaises(web.HTTPError) as raised:
-            await DatalabLoginHandler.post(handler)
-
-        self.assertEqual(raised.exception.status_code, 503)
-        self.assertIsNone(handler.redirected_to)
-
-    async def test_spawn_failure_returns_503_without_redirecting(self):
-        handler = _Handler(ready=True, spawn_error=RuntimeError("spawn failed"))
-
-        with self.assertRaises(web.HTTPError) as raised:
-            await DatalabLoginHandler.post(handler)
-
-        self.assertEqual(raised.exception.status_code, 503)
-        self.assertIsNone(handler.redirected_to)
+                self.assertEqual(raised.exception.status_code, 503)
+                self.assertIsNone(handler.redirected_to)

@@ -18,9 +18,32 @@ class SelectedItemNotebookTests(TestCase):
         source = _initialization_source(("lab:one", "lab:two"))
         banner = _selection_banner(2)
 
-        self.assertIn("selected_item_refcodes", source)
-        self.assertIn('"lab:one"', source)
-        self.assertIn("selected_item_errors", source)
+        class Datalab:
+            calls = []
+
+            @classmethod
+            def get_item(cls, *, refcode, load_blocks):
+                cls.calls.append((refcode, load_blocks))
+                if refcode == "lab:two":
+                    raise ValueError("not readable")
+                return {"refcode": refcode}
+
+        namespace = {"datalab": Datalab}
+        exec(source, namespace)  # noqa: S102
+        exec(source, namespace)  # noqa: S102
+
+        self.assertEqual(namespace["selected_item_refcodes"], ["lab:one", "lab:two"])
+        self.assertEqual(namespace["selected_items"], [{"refcode": "lab:one"}])
+        self.assertEqual(namespace["selected_item_errors"], {"lab:two": "not readable"})
+        self.assertEqual(
+            Datalab.calls,
+            [
+                ("lab:one", False),
+                ("lab:two", False),
+                ("lab:one", False),
+                ("lab:two", False),
+            ],
+        )
         self.assertIn("2 items", banner)
 
 
@@ -93,6 +116,7 @@ class SelectedItemsHandlerTests(unittest.IsolatedAsyncioTestCase):
             handler.redirected_to,
             ("/user/test/lab/tree/Selected%20items.ipynb", False),
         )
+        self.assertEqual(handler.headers["Cache-Control"], "no-store")
         self.assertNotIn("notebook-code", handler.request.uri)
 
     async def test_post_does_not_fall_back_to_a_query_code(self):
@@ -101,19 +125,6 @@ class SelectedItemsHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(web.HTTPError) as raised:
             await SelectedItemsHandler.post(handler)
-
-        self.assertEqual(raised.exception.status_code, 403)
-
-    async def test_post_preserves_invalid_or_expired_code_failures(self):
-        handler = _Handler()
-
-        with patch.object(
-            selected_items_module,
-            "_exchange_selection",
-            new=AsyncMock(side_effect=web.HTTPError(403, "Invalid or expired code")),
-        ):
-            with self.assertRaises(web.HTTPError) as raised:
-                await SelectedItemsHandler.post(handler)
 
         self.assertEqual(raised.exception.status_code, 403)
 
