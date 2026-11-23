@@ -55,6 +55,23 @@ returns the exact delegated token already injected into it and that token has at
 least ten minutes remaining. Kernels, terminals, processes, unsaved in-memory
 state, and persistent files then continue unchanged.
 
+Each successful launch opens a new native JupyterLab workspace. A workspace
+keeps its own browser layout, but it is not a separate server, security boundary,
+or compute environment. Selected-items launches additionally create a separate
+notebook, kernel, and Jupyter session within the shared user server.
+
+| Object | Per launch? | Isolation model |
+|---|---:|---|
+| Single-user server/container | No — one default server per datalab user | Shared process and resource boundary |
+| Persistent volume/files | No | Shared |
+| JupyterLab workspace | Yes | Browser layout only |
+| Selected notebook/kernel/session | Yes, for selected-items launches | Separate kernel; shared server, resources, and token |
+
+Use JupyterLab's **Running Terminals and Kernels** panel when you want to inspect
+or stop accumulated kernels and terminals. Workspaces are not automatically
+discovered or cleaned up by this integration, and opening the same notebook in
+two workspaces does not provide kernel isolation.
+
 The Hub performs one controlled replacement when the token is fresh, invalid,
 near expiry, belongs to another API, or cannot be verified against the running
 server. Persistent files survive a replacement, but running and unsaved state

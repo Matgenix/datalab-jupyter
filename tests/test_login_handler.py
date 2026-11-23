@@ -179,14 +179,20 @@ class _Handler:
     async def _require_current_credentials(self, user, *, token, api_url):
         await DatalabLoginHandler._require_current_credentials(user, token=token, api_url=api_url)
 
-    async def _reconcile_server(self, user, *, token, api_url, session_reused, required):
+    async def _reconcile_server(self, user, *, token, api_url, session_reused):
         await DatalabLoginHandler._reconcile_server(
             self,
             user,
             token=token,
             api_url=api_url,
             session_reused=session_reused,
-            required=required,
+        )
+
+    def _require_matching_server(self, user, *, token, api_url):
+        DatalabLoginHandler._require_matching_server(
+            user,
+            token=token,
+            api_url=api_url,
         )
 
     async def _spawn_current_server(self, user, *, token, api_url):
@@ -204,9 +210,6 @@ class _Handler:
 
     async def _verify_server_stopped(self, spawner):
         await DatalabLoginHandler._verify_server_stopped(spawner)
-
-    def get_next_url(self, _user):
-        return "/hub/home"
 
     async def stop_single_user(self, _user):
         self.events.append("stop")
@@ -304,13 +307,17 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(handler.events, ["login", "spawn", "spawn-complete", "redirect"])
 
-    async def test_fresh_normal_launch_keeps_the_standard_hub_redirect(self):
+    async def test_fresh_normal_launch_starts_server_and_redirects_to_workspace(self):
         handler = _Handler(selected_items=False)
 
         await DatalabLoginHandler.post(handler)
 
-        self.assertEqual(handler.events, ["login", "redirect"])
-        self.assertEqual(handler.redirected_to, ("/hub/home", False))
+        self.assertEqual(handler.events, ["login", "spawn", "spawn-complete", "redirect"])
+        self.assertRegex(
+            handler.redirected_to[0],
+            r"^/user/test/lab/workspaces/[A-Za-z0-9_-]+$",
+        )
+        self.assertFalse(handler.redirected_to[1])
 
     async def test_pending_spawn_is_awaited_then_replaced(self):
         handler = _Handler(pending="spawn")
@@ -354,12 +361,16 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("spawn", handler.events)
         self.assertIs(handler.user.spawners[""], new_spawner)
 
-    async def test_pending_stop_for_an_ordinary_launch_uses_standard_redirect(self):
+    async def test_pending_stop_for_an_ordinary_launch_spawns_before_workspace_redirect(self):
         handler = _Handler(pending="stop", selected_items=False)
 
         await DatalabLoginHandler.post(handler)
 
-        self.assertEqual(handler.events, ["login", "pending-stop-complete", "redirect"])
+        self.assertEqual(
+            handler.events,
+            ["login", "pending-stop-complete", "spawn", "spawn-complete", "redirect"],
+        )
+        self.assertIn("/lab/workspaces/", handler.redirected_to[0])
 
     async def test_unknown_provenance_replaces_a_ready_server_once(self):
         handler = _Handler(
@@ -418,11 +429,13 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_same_token_concurrent_launches_retain_one_server(self):
         first = _Handler(
             ready=True,
+            selected_items=False,
             session_reused=True,
             returned_token="stale-token",  # noqa: S106
         )
         second = _Handler(
             ready=True,
+            selected_items=False,
             session_reused=True,
             returned_token="stale-token",  # noqa: S106
         )
@@ -436,6 +449,25 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("stop", first.events)
         self.assertNotIn("stop", second.events)
         self.assertIs(first.user.spawners[""], first.spawner)
+        self.assertNotEqual(first.redirected_to[0], second.redirected_to[0])
+        self.assertIn("/lab/workspaces/", first.redirected_to[0])
+        self.assertIn("/lab/workspaces/", second.redirected_to[0])
+
+    async def test_unverified_ready_server_does_not_redirect(self):
+        handler = _Handler(selected_items=False)
+        original_spawn = handler.spawn_single_user
+
+        async def spawn_without_provenance(user):
+            await original_spawn(user)
+            del handler.spawner._datalab_credential_fingerprint
+
+        handler.spawn_single_user = spawn_without_provenance
+
+        with self.assertRaises(web.HTTPError) as raised:
+            await DatalabLoginHandler.post(handler)
+
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertIsNone(handler.redirected_to)
 
     async def test_lifecycle_locks_are_per_user(self):
         first = _Handler()
@@ -529,8 +561,12 @@ class _PreparedLoginHandler(DatalabLoginHandler):
         )
         return target_user
 
-    def get_next_url(self, user=None):
-        return "/hub/home"
+    async def spawn_single_user(self, user):
+        spawner = _Spawner()
+        user.spawners[""] = spawner
+        await DatalabAuthenticator.pre_spawn_start(None, user, spawner)
+        spawner.pending = "spawn"
+        spawner._spawn_future = _LifecycleCompletion(spawner, "spawn", True)
 
     def redirect(self, url, permanent=False, status=None):
         self.redirected_to = (url, permanent)
@@ -570,4 +606,5 @@ class PreparedHandlerIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(application.settings["candidate_seen"], "stale-token")
         self.assertEqual(target_user.auth_state["tool_access_token"], "target-token")
-        self.assertEqual(handler.redirected_to, ("/hub/home", False))
+        self.assertIn("/user/test/lab/workspaces/", handler.redirected_to[0])
+        self.assertFalse(handler.redirected_to[1])

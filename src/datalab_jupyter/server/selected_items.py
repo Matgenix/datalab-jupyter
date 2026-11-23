@@ -1,11 +1,12 @@
 """Create a notebook from an item selection handed off by datalab."""
 
+import asyncio
 import json
 import os
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 import nbformat
@@ -15,11 +16,13 @@ from jupyter_server.utils import url_path_join
 from tornado import web
 
 from datalab_jupyter.fragment_post import render_fragment_post
+from datalab_jupyter.urls import workspace_url
 
 _BANNER_PATH = Path.home() / ".local" / "share" / "datalab-jupyter" / "banner.html"
 _EXCHANGE_PATH = "/v0.1/tools/jupyter/selection/exchange"
 _ACTION_ID = "open-in-notebook"
 _MAX_ITEMS = 20
+_NOTEBOOK_ALLOCATION_ATTEMPTS = 2
 
 
 async def _exchange_selection(code: str) -> tuple[str, ...]:
@@ -100,12 +103,42 @@ def _selection_banner(item_count: int) -> str:
 async def _unused_notebook_path(contents_manager: Any) -> str:
     """Return a readable notebook path that does not yet exist."""
     stem = datetime.now(timezone.utc).strftime("Selected datalab items %Y-%m-%d %H%M%S")
-    for suffix in range(1000):
-        label = stem if suffix == 0 else f"{stem} {suffix + 1}"
-        path = f"{label}.ipynb"
+    for _attempt in range(_NOTEBOOK_ALLOCATION_ATTEMPTS):
+        path = f"{stem} {secrets.token_urlsafe(16)}.ipynb"
         if not await ensure_async(contents_manager.exists(path)):
             return path
     raise RuntimeError("Unable to allocate a unique selected-items notebook name")
+
+
+async def _cleanup_created_resources(
+    handler: JupyterHandler,
+    *,
+    path: str,
+    notebook_created: bool,
+    kernel_id: str | None,
+    session_id: str | None,
+) -> None:
+    """Best-effort cleanup of resources attributed to one failed request."""
+
+    session_deleted = False
+    if session_id is not None:
+        try:
+            await ensure_async(handler.session_manager.delete_session(session_id))
+            # Jupyter Server owns the session's kernel and stops it when the
+            # session is deleted, so only use direct shutdown as a fallback.
+            session_deleted = True
+        except Exception as exc:
+            handler.log.warning("Unable to delete failed selected-items session: %s", exc)
+    if kernel_id is not None and not session_deleted:
+        try:
+            await ensure_async(handler.kernel_manager.shutdown_kernel(kernel_id, now=True))
+        except Exception as exc:
+            handler.log.warning("Unable to stop failed selected-items kernel: %s", exc)
+    if notebook_created:
+        try:
+            await ensure_async(handler.contents_manager.delete_file(path))
+        except Exception as exc:
+            handler.log.warning("Unable to delete failed selected-items notebook: %s", exc)
 
 
 async def _execute_initialization(
@@ -168,14 +201,16 @@ async def _create_selected_items_notebook(
     session_manager = handler.session_manager
     path = await _unused_notebook_path(contents_manager)
     model = {"type": "notebook", "format": "json", "content": notebook}
-    await ensure_async(contents_manager.save(model, path))
-
+    notebook_created = False
     kernel_id: str | None = None
+    session_id: str | None = None
     try:
+        await ensure_async(contents_manager.save(model, path))
+        notebook_created = True
         kernel_id = await ensure_async(
             kernel_manager.start_kernel(path=path, kernel_name="python3")
         )
-        await ensure_async(
+        session = await ensure_async(
             session_manager.create_session(
                 path=path,
                 name=Path(path).name,
@@ -183,33 +218,40 @@ async def _create_selected_items_notebook(
                 kernel_id=kernel_id,
             )
         )
-    except Exception:
-        if kernel_id is not None:
-            await ensure_async(kernel_manager.shutdown_kernel(kernel_id, now=True))
-        await ensure_async(contents_manager.delete_file(path))
-        raise
+        session_id = session.get("id") if isinstance(session, dict) else None
+        if not isinstance(session_id, str) or not session_id:
+            raise RuntimeError("The selected-items Jupyter session has no identifier")
 
-    try:
-        initialization["execution_count"] = await _execute_initialization(
-            kernel_manager,
-            kernel_id,
-            initialization["source"],
-        )
-    except Exception as exc:
-        handler.log.warning("Unable to initialize selected datalab items: %s", exc)
-        initialization["outputs"] = [
-            nbformat.v4.new_output(
-                "stream",
-                name="stderr",
-                text=(
-                    "The selected items could not be loaded automatically. "
-                    "Run this cell to try again.\n"
-                ),
+        try:
+            initialization["execution_count"] = await _execute_initialization(
+                kernel_manager,
+                kernel_id,
+                initialization["source"],
             )
-        ]
+        except Exception as exc:
+            handler.log.warning("Unable to initialize selected datalab items: %s", exc)
+            initialization["outputs"] = [
+                nbformat.v4.new_output(
+                    "stream",
+                    name="stderr",
+                    text=(
+                        "The selected items could not be loaded automatically. "
+                        "Run this cell to try again.\n"
+                    ),
+                )
+            ]
 
-    await ensure_async(contents_manager.save(model, path))
-    return path
+        await ensure_async(contents_manager.save(model, path))
+        return path
+    except (Exception, asyncio.CancelledError):
+        await _cleanup_created_resources(
+            handler,
+            path=path,
+            notebook_created=notebook_created,
+            kernel_id=kernel_id,
+            session_id=session_id,
+        )
+        raise
 
 
 class SelectedItemsHandler(JupyterHandler):
@@ -241,12 +283,7 @@ class SelectedItemsHandler(JupyterHandler):
             self.log.exception("Unable to create a selected-items notebook")
             raise web.HTTPError(500, "Unable to create the selected-items notebook") from exc
 
-        notebook_url = url_path_join(
-            self.base_url,
-            "lab",
-            "tree",
-            quote(path, safe="/"),
-        )
+        notebook_url = workspace_url(self.base_url, notebook_path=path)
         self.redirect(notebook_url, permanent=False)
 
 

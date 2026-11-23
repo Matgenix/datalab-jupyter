@@ -153,6 +153,23 @@ Managed user-server defaults are 2 CPU cores, 4 GiB memory, at most 512
 processes, shutdown after one hour idle, and a maximum age of 24 hours. Override
 them only after representative scientific-kernel testing:
 
+Every launch receives a native JupyterLab workspace, but all of a user's
+workspaces run in the same default single-user server and persistent volume.
+Selected-items launches create a dedicated notebook, kernel, and Jupyter session
+inside that shared server.
+
+| Object | Per launch? | Isolation model |
+|---|---:|---|
+| Single-user server/container | No — one default server per datalab user | Shared process and resource boundary |
+| Persistent volume/files | No | Shared |
+| JupyterLab workspace | Yes | Browser layout only |
+| Selected notebook/kernel/session | Yes, for selected-items launches | Separate kernel; shared server, resources, and token |
+
+Users can inspect and stop accumulated kernels and terminals with JupyterLab's
+**Running Terminals and Kernels** panel. The integration does not discover or
+clean up old workspaces, impose per-workspace process quotas, or make two views
+of the same notebook independent.
+
 | Setting | Default | Purpose |
 |---|---:|---|
 | `DATALAB_JUPYTER_CPU_LIMIT` | `2` | CPU cores per user server |
@@ -230,6 +247,12 @@ pip install 'datalab-jupyter[hub]==<reviewed-version>'
 # In the single-user image, install the same version:
 pip install 'datalab-jupyter[server]==<reviewed-version>'
 ```
+
+The `server` extra integrates with Jupyter Server but does not install the
+JupyterLab user interface. The single-user image must also provide a compatible
+JupyterLab installation (the managed image uses JupyterLab 4.6.2). Verify that
+`/lab/workspaces/<workspace-id>/tree/<notebook>` URLs open correctly in that
+image before deployment.
 
 Then configure the Hub:
 

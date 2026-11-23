@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Open every successful launch in a distinct native JupyterLab workspace. Give
+  each selected-items launch a randomly named notebook, dedicated kernel, and
+  Jupyter session, with request-owned cleanup after fatal partial failures.
 - Reuse a ready Jupyter user server when datalab returns the exact delegated
   token already injected into it with at least ten minutes remaining, preserving
   kernels and terminals; retain conservative one-time replacement for fresh,

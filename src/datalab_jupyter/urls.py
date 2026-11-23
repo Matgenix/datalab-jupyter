@@ -1,7 +1,8 @@
 """Shared browser URL handling for the managed JupyterHub."""
 
 import os
-from urllib.parse import urlsplit
+import secrets
+from urllib.parse import quote, urlsplit
 
 
 def configured_base_url() -> str:
@@ -16,3 +17,24 @@ def configured_base_url() -> str:
         path = f"{app_path}/jupyter/"
     normalized_path = path.strip("/")
     return f"/{normalized_path}/" if normalized_path else "/"
+
+
+def new_workspace_id() -> str:
+    """Return a fresh URL-safe identifier for one JupyterLab workspace."""
+
+    return secrets.token_urlsafe(16)
+
+
+def workspace_url(
+    server_base_url: str,
+    *,
+    workspace_id: str | None = None,
+    notebook_path: str | None = None,
+) -> str:
+    """Build a native JupyterLab workspace URL below a user server base path."""
+
+    workspace = quote(workspace_id or new_workspace_id(), safe="")
+    destination = f"{server_base_url.rstrip('/')}/lab/workspaces/{workspace}"
+    if notebook_path is not None:
+        destination = f"{destination}/tree/{quote(notebook_path.lstrip('/'), safe='/')}"
+    return destination

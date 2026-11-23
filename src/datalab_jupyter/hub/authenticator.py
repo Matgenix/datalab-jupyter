@@ -16,6 +16,7 @@ from tornado import web
 from traitlets import Unicode
 
 from datalab_jupyter.fragment_post import render_fragment_post
+from datalab_jupyter.urls import workspace_url
 
 EXCHANGE_PATH = "/v0.1/tools/plugins/jupyter/exchange"
 REUSE_CANDIDATE_HEADER = "DATALAB-EXISTING-TOOL-TOKEN"
@@ -156,15 +157,20 @@ class DatalabLoginHandler(LoginHandler):
                 token=exchange.tool_access_token,
                 api_url=self.authenticator.api_url.rstrip("/"),
                 session_reused=exchange.session_reused,
-                required=notebook_launch_code is not None,
+            )
+            self._require_matching_server(
+                user,
+                token=exchange.tool_access_token,
+                api_url=self.authenticator.api_url.rstrip("/"),
             )
             await self._require_current_credentials(
                 user,
                 token=exchange.tool_access_token,
                 api_url=self.authenticator.api_url.rstrip("/"),
             )
-            next_url = self.get_next_url(user)
-            if notebook_launch_code is not None:
+            if notebook_launch_code is None:
+                next_url = workspace_url(user.url)
+            else:
                 next_url = (
                     f"{url_path_join(user.url, 'datalab/open-selected')}#"
                     f"{urlencode({'notebook_launch_code': notebook_launch_code})}"
@@ -224,15 +230,13 @@ class DatalabLoginHandler(LoginHandler):
         token: str,
         api_url: str,
         session_reused: bool,
-        required: bool,
     ) -> None:
         """Retain a compatible server or perform one controlled replacement."""
 
         await self._require_current_credentials(user, token=token, api_url=api_url)
         spawner = user.spawners.get("")
         if spawner is None:
-            if required:
-                await self._spawn_current_server(user, token=token, api_url=api_url)
+            await self._spawn_current_server(user, token=token, api_url=api_url)
             return
 
         pending = spawner.pending
@@ -257,8 +261,7 @@ class DatalabLoginHandler(LoginHandler):
             await self._verify_server_stopped(spawner)
             self._clear_server_provenance(spawner)
             await self._require_current_credentials(user, token=token, api_url=api_url)
-            if required:
-                await self._spawn_current_server(user, token=token, api_url=api_url)
+            await self._spawn_current_server(user, token=token, api_url=api_url)
             return
         elif pending:
             raise web.HTTPError(503, "The existing Jupyter server is busy")
@@ -284,8 +287,19 @@ class DatalabLoginHandler(LoginHandler):
 
         if spawner.active:
             raise web.HTTPError(503, "The existing Jupyter server is in an unknown state")
-        if required:
-            await self._spawn_current_server(user, token=token, api_url=api_url)
+        await self._spawn_current_server(user, token=token, api_url=api_url)
+
+    @staticmethod
+    def _require_matching_server(user: Any, *, token: str, api_url: str) -> None:
+        """Require a ready default server with the expected credential provenance."""
+
+        spawner = user.spawners.get("")
+        if spawner is None or spawner.pending or not spawner.ready:
+            raise web.HTTPError(503, "The Jupyter server is not ready")
+        if getattr(spawner, _CREDENTIAL_FINGERPRINT_ATTRIBUTE, None) != _credential_fingerprint(
+            token, api_url
+        ):
+            raise web.HTTPError(503, "The Jupyter server credentials could not be verified")
 
     async def _spawn_current_server(self, user: Any, *, token: str, api_url: str) -> None:
         await self._require_current_credentials(user, token=token, api_url=api_url)
