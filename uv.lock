@@ -536,8 +536,8 @@ plugin-dev = [{ name = "datalab-server", extras = ["server"], git = "https://git
 
 [[package]]
 name = "datalab-server"
-version = "0.1.0.post1752+g65479b515"
-source = { git = "https://github.com/Matgenix/datalab.git?subdirectory=pydatalab&branch=dw%2Ftools_plugins_nojupyter#65479b515b26cbe13a9c332326ea1313559c58cd" }
+version = "0.1.0.post1754+gf15ece1c9"
+source = { git = "https://github.com/Matgenix/datalab.git?subdirectory=pydatalab&branch=dw%2Ftools_plugins_nojupyter#f15ece1c9fc262803cbf5957da4a7d5bc93aae66" }
 dependencies = [
     { name = "bokeh" },
     { name = "deepdiff" },

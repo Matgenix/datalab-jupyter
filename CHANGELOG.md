@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Reuse a ready Jupyter user server when datalab returns the exact delegated
+  token already injected into it with at least ten minutes remaining, preserving
+  kernels and terminals; retain conservative one-time replacement for fresh,
+  mismatched, near-expiry, or unverifiable credentials.
+- Serialize Hub-local credential exchange and per-user lifecycle reconciliation,
+  and keep selected-items handoff codes request-local instead of shared auth state.
 - Harden managed user containers with a validated PID limit, a complete Linux capability drop,
   and `no-new-privileges`. Document that managed Compose is a trusted-user profile whose shared
   bridge and named-volume backing storage do not provide hostile multi-tenant isolation.

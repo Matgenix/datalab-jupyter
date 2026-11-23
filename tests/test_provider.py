@@ -12,6 +12,7 @@ TOOLS_API_AVAILABLE = (
 
 if TOOLS_API_AVAILABLE:
     from flask import Flask
+    from pydatalab.tools import ToolSessionPolicy
 
     from datalab_jupyter.plugin import provider as provider_module
     from datalab_jupyter.plugin.provider import JUPYTER_BLUEPRINT, JupyterToolProvider
@@ -44,6 +45,23 @@ class ProviderTests(TestCase):
         self.assertIn("#datalab_launch_code=launch+code%2Fvalue", login_url)
         self.assertNotIn("?datalab_launch_code=", login_url)
 
+    def test_launch_requests_reuse_or_replace_with_the_default_lifetime(self):
+        settings = SimpleNamespace(
+            client_id="jupyter-client",
+            browser_url=lambda _app_url: "https://jupyter.example.test/jupyter",
+        )
+        grants = SimpleNamespace(issue=lambda *args, **kwargs: "launch-code")
+
+        with patch.object(provider_module, "load_plugin_settings", return_value=settings):
+            provider = JupyterToolProvider()
+        with patch.object(grants, "issue", wraps=grants.issue) as issue_mock:
+            provider.launch(SimpleNamespace(), grants)
+
+        issue_mock.assert_called_once_with(
+            "jupyter-client",
+            session_policy=ToolSessionPolicy.REUSE_OR_REPLACE,
+        )
+
     def test_exchange_requires_service_credentials_and_uses_service_helper(self):
         settings = SimpleNamespace(
             client_id="jupyter-client",
@@ -61,6 +79,7 @@ class ProviderTests(TestCase):
                 expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
             ),
             selection=None,
+            session_reused=True,
         )
 
         with (
@@ -100,7 +119,10 @@ class ProviderTests(TestCase):
             response = client.post(
                 "/tool/exchange",
                 json={"code": "launch-code"},
-                headers={"Authorization": f"Basic {valid_credentials}"},
+                headers={
+                    "Authorization": f"Basic {valid_credentials}",
+                    "DATALAB-EXISTING-TOOL-TOKEN": "existing-token",
+                },
             )
 
             self.assertEqual(response.status_code, 200)
@@ -108,4 +130,40 @@ class ProviderTests(TestCase):
                 "launch-code",
                 JupyterToolProvider.id,
                 settings.client_id,
+                tool_session_lifetime_seconds=24 * 60 * 60,
+                candidate_tool_access_token="existing-token",  # noqa: S106
+                minimum_reuse_lifetime_seconds=10 * 60,
             )
+            self.assertTrue(response.get_json()["session_reused"])
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+
+    def test_exchange_rejects_malformed_or_unsupported_json(self):
+        settings = SimpleNamespace(
+            client_id="jupyter-client",
+            client_secret="a-long-confidential-service-secret",  # noqa: S106
+        )
+        credentials = b64encode(f"{settings.client_id}:{settings.client_secret}".encode()).decode()
+        with (
+            patch.object(provider_module, "load_plugin_settings", return_value=settings),
+            patch.object(provider_module, "exchange_service_launch_code") as exchange_mock,
+        ):
+            provider = JupyterToolProvider()
+            app = Flask(__name__)
+            app.register_blueprint(JUPYTER_BLUEPRINT, url_prefix="/tool")
+
+            @app.before_request
+            def authenticate_service_request():
+                if not provider.authenticate_service_request():
+                    return {"status": "error"}, 401
+                return None
+
+            client = app.test_client()
+            for payload in (None, [], {}, {"code": "value", "token": "body-token"}):
+                with self.subTest(payload=payload):
+                    response = client.post(
+                        "/tool/exchange",
+                        json=payload,
+                        headers={"Authorization": f"Basic {credentials}"},
+                    )
+                    self.assertEqual(response.status_code, 400)
+            exchange_mock.assert_not_called()

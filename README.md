@@ -16,7 +16,7 @@ extension.
 ### Open a working environment
 
 Sign in to datalab, click **Tools**, and choose **JupyterLab**. The Hub starts or
-replaces your user server and opens JupyterLab. Each Python notebook and Jupyter
+reconciles your user server and opens JupyterLab. Each Python notebook and Jupyter
 console preloads:
 
 ```python
@@ -50,17 +50,22 @@ these selection variables.
 
 ### Sessions and files
 
-Launching JupyterLab again replaces your existing user server so the new server
-receives a fresh temporary datalab credential. Files in your persistent work
-volume survive; running kernels, terminals, processes, and unsaved in-memory
-state stop. Save work before relaunching.
+Launching JupyterLab again keeps an eligible running user server when datalab
+returns the exact delegated token already injected into it and that token has at
+least ten minutes remaining. Kernels, terminals, processes, unsaved in-memory
+state, and persistent files then continue unchanged.
+
+The Hub performs one controlled replacement when the token is fresh, invalid,
+near expiry, belongs to another API, or cannot be verified against the running
+server. Persistent files survive a replacement, but running and unsaved state
+does not. Save important work regularly and relaunch if a datalab request reports
+HTTP 401.
 
 The managed image includes SciPy, pandas, Matplotlib, seaborn, ipywidgets,
 lmfit, uncertainties, Pint, openpyxl, h5py, tqdm, and a compatible NumPy.
 Deployment administrators may provide a different single-user image.
 
-If a datalab request reports HTTP 401, save your files and relaunch JupyterLab
-from datalab. Contact the deployment administrator if JupyterLab is absent from
+Contact the deployment administrator if JupyterLab is absent from
 the complete Tools catalog or the Hub fails to start.
 
 ## Integration overview
@@ -74,10 +79,11 @@ The distribution has three independently installable components:
   environment.
 
 The provider issues a single-use launch grant. The Hub exchanges it with shared
-client credentials, stores the temporary datalab token in encrypted JupyterHub
-authentication state, and injects it only into the matching user server. Browser
-handoffs carry launch codes in URL fragments and submit them through
-same-origin, XSRF-protected POST requests.
+client credentials, optionally presenting the current encrypted token as a reuse
+candidate. It stores the authoritative temporary token in encrypted JupyterHub
+authentication state and injects it only into the matching user server. Browser
+handoffs carry launch codes in URL fragments and submit them through same-origin,
+XSRF-protected POST requests.
 
 Provider, Hub, and server versions must be upgraded together. Installation does
 not itself start JupyterHub; the deployment chooses either the managed companion

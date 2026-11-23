@@ -13,6 +13,7 @@ from pydatalab.tools import (
     ToolMetadata,
     ToolProvider,
     ToolRouteAuth,
+    ToolSessionPolicy,
     exchange_service_launch_code,
     issue_tool_selection_code,
 )
@@ -20,6 +21,7 @@ from pydatalab.tools import (
 from datalab_jupyter.config import PluginSettings, load_plugin_settings
 
 JUPYTER_BLUEPRINT = Blueprint("jupyter-tool", __name__)
+_MAX_CANDIDATE_TOKEN_LENGTH = 4096
 
 
 def _distribution_version() -> str:
@@ -73,21 +75,44 @@ class JupyterToolProvider(ToolProvider):
         )
 
     def launch(self, context: ToolContext, grants: ToolLaunchGrantIssuer) -> str:
-        code = grants.issue(self.settings.client_id)
+        code = grants.issue(
+            self.settings.client_id,
+            session_policy=ToolSessionPolicy.REUSE_OR_REPLACE,
+        )
         return _login_url(code, self.settings)
+
+
+@JUPYTER_BLUEPRINT.after_request
+def disable_exchange_caching(response):
+    """Keep exchange credentials and results out of intermediary caches."""
+
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @JUPYTER_BLUEPRINT.route("/exchange", methods=["POST"])
 def exchange_jupyter_launch_code():
     """Exchange one launch code for a delegated datalab tool session."""
 
-    payload = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or set(payload) != {"code"}:
+        return jsonify({"status": "error", "message": "Invalid exchange request"}), 400
     code = payload.get("code")
     if not isinstance(code, str) or not code:
         return jsonify({"status": "error", "message": "A launch code is required"}), 400
 
     settings = load_plugin_settings()
-    exchange = exchange_service_launch_code(code, JupyterToolProvider.id, settings.client_id)
+    candidate = request.headers.get("DATALAB-EXISTING-TOOL-TOKEN")
+    if candidate is not None and len(candidate) > _MAX_CANDIDATE_TOKEN_LENGTH:
+        candidate = None
+    exchange = exchange_service_launch_code(
+        code,
+        JupyterToolProvider.id,
+        settings.client_id,
+        tool_session_lifetime_seconds=24 * 60 * 60,
+        candidate_tool_access_token=candidate,
+        minimum_reuse_lifetime_seconds=10 * 60,
+    )
     if exchange is None:
         return jsonify({"status": "error", "message": "Invalid or expired launch code"}), 400
 
@@ -98,6 +123,7 @@ def exchange_jupyter_launch_code():
         "group_ids": list(exchange.context.group_ids),
         "tool_access_token": exchange.tool_session.tool_access_token,
         "expires_at": exchange.tool_session.expires_at.isoformat(),
+        "session_reused": exchange.session_reused,
     }
     if exchange.selection is not None:
         response_payload["notebook_launch_code"] = issue_tool_selection_code(
@@ -107,5 +133,4 @@ def exchange_jupyter_launch_code():
         )
 
     response = jsonify(response_payload)
-    response.headers["Cache-Control"] = "no-store"
     return response, 200

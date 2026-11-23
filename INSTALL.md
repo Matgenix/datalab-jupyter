@@ -102,10 +102,12 @@ credential-free `/hub/datalab-login` and
 ### 6. Verify as a normal user
 
 Confirm that a non-administrator can launch **JupyterLab**, use the preloaded
-`datalab` client, and create a notebook with **Open in notebook**. Relaunch and
-verify that persistent files survive while the prior kernel stops. Also verify
-that the Hub and user containers cannot reach MongoDB or read datalab server
-secrets.
+`datalab` client, and create a notebook with **Open in notebook**. Before the
+delegated token reaches its final ten minutes, relaunch and verify that the same
+server, kernel state, running terminal, and persistent files remain. Then verify
+that a fresh or unverifiable credential replaces the server once while preserving
+persistent files. Also verify that the Hub and user containers cannot reach
+MongoDB or read datalab server secrets.
 
 ## Routine operations
 
@@ -125,10 +127,11 @@ both simultaneously.
 ### Upgrade and rollback
 
 Upgrade the provider package, Hub image, and user-server integration atomically.
-The current browser handoff has no query-string compatibility path. Each
-successful relaunch must replace the existing user server so it receives the
-new delegated token; release that behavior before or together with datalab's
-revoke-on-relaunch policy, never after it.
+The current browser handoff has no query-string compatibility path. Reuse support
+requires datalab's `REUSE_OR_REPLACE` session policy: deploy that core support
+before this release. An older Hub sends no candidate and therefore continues to
+replace safely; a provider response without `session_reused` is also treated as
+a replacement.
 
 For an upgrade, review a new source revision, publish and pin its image digest,
 pin the matching provider release in `plugins.toml`, rebuild datalab, and recreate
@@ -208,6 +211,12 @@ Launch codes and temporary tokens must never be stored in URLs, notebooks,
 files, analytics, or logs. Browser fragments are removed before same-origin POST
 exchange, but proxies must still avoid request-body logging.
 
+Reuse coordination is local to one Hub process. The exchange is serialized, and
+each live Hub user has a separate lifecycle lock. Running-server credential
+provenance is deliberately process-local, so the first launch after a Hub restart
+conservatively replaces a surviving server. Idle-culler and administrator actions
+remain outside these locks.
+
 ## External JupyterHub
 
 Use an external Hub when another platform owns the spawner, TLS, storage,
@@ -242,10 +251,13 @@ lifetimes within the delegated datalab session lifetime. Configure the provider
 with `DATALAB_JUPYTER_EXTERNAL_URL=<public-https-hub-url>` and run datalab
 without the companion Compose file.
 
-The external deployment must replace a user's existing server on successful
-relaunch, isolate user environments from datalab's database and secrets, and
-meet the proxy logging requirements above. New datalab users are created in the
-Hub on first successful launch; no pre-provisioned user list is required.
+The external deployment must preserve the `DATALAB_API_KEY`, `DATALAB_API_URL`,
+and `DATALAB_CURRENT_USER_JSON` values written by the authenticator's pre-spawn
+hook. It may retain a ready default server only when the authenticator verifies
+matching process-local credential provenance; otherwise it replaces that server
+once. It must also isolate user environments from datalab's database and secrets
+and meet the proxy logging requirements above. New datalab users are created in
+the Hub on first successful launch; no pre-provisioned user list is required.
 
 ## Local development and insecure HTTP
 
