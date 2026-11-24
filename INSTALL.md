@@ -102,12 +102,17 @@ credential-free `/hub/datalab-login` and
 ### 6. Verify as a normal user
 
 Confirm that a non-administrator can launch **JupyterLab**, use the preloaded
-`datalab` client, and create a notebook with **Open in notebook**. Before the
-delegated token reaches its final ten minutes, relaunch and verify that the same
-server, kernel state, running terminal, and persistent files remain. Then verify
-that a fresh or unverifiable credential replaces the server once while preserving
-persistent files. Also verify that the Hub and user containers cannot reach
-MongoDB or read datalab server secrets.
+`datalab` client, and create a notebook with **Open in notebook**. Once the
+delegated token enters its final hour, relaunch, choose **Extend Datalab access
+and open JupyterLab**, and verify that the token, server, kernel state, running
+terminal, and persistent files remain while the authoritative expiry advances.
+Verify that **Continue without extending** reuses above the ten-minute minimum
+and rotates/restarts below it. A hard-capped, revoked, or unverifiable credential
+must also replace the server once while preserving persistent files. Confirm idle
+and maximum-age culling still apply, and that the Hub and user containers cannot
+reach MongoDB or read datalab server secrets.
+If the confirmation expires or reports changed access, launch JupyterLab again
+from datalab and repeat the check.
 
 ## Routine operations
 
@@ -126,17 +131,19 @@ both simultaneously.
 
 ### Upgrade and rollback
 
-Upgrade the provider package, Hub image, and user-server integration atomically.
-The current browser handoff has no query-string compatibility path. Reuse support
-requires datalab's `REUSE_OR_REPLACE` session policy: deploy that core support
-before this release. An older Hub sends no candidate and therefore continues to
-replace safely; a provider response without `session_reused` is also treated as
-a replacement.
+Deploy datalab's `REUSE_OR_REPLACE` policy and explicit-renewal core support
+before this release. Then upgrade the provider package, Hub image, and user-server
+integration atomically. The browser handoff has no query-string compatibility
+path. An older Hub sends no candidate and therefore continues to replace safely;
+a provider response without result flags is also treated as a replacement.
 
 For an upgrade, review a new source revision, publish and pin its image digest,
 pin the matching provider release in `plugins.toml`, rebuild datalab, and recreate
 the combined deployment. Verify the launch and relaunch tests above. For
 rollback, restore both previous pins and recreate all components together.
+Roll back the Jupyter components before rolling back datalab core, and allow
+outstanding five-minute launch grants to expire. Rollback does not shorten a
+credential whose expiry was already renewed; revoke it explicitly if needed.
 
 ### Removal
 
@@ -152,6 +159,12 @@ removing any volume.
 Managed user-server defaults are 2 CPU cores, 4 GiB memory, at most 512
 processes, shutdown after one hour idle, and a maximum age of 24 hours. Override
 them only after representative scientific-kernel testing:
+
+Delegated datalab credentials normally use a 24-hour rolling renewal horizon
+with a seven-day absolute age cap. Those limits are independent of the Hub login
+cookie, the one-hour idle timeout, and `DATALAB_JUPYTER_MAX_AGE`. Increasing the
+server maximum age for multi-day computation requires a separate resource and
+security review; credential renewal alone does not keep a server alive.
 
 Every launch receives a native JupyterLab workspace, but all of a user's
 workspaces run in the same default single-user server and persistent volume.
@@ -226,13 +239,19 @@ shared-network, and Docker-socket risks.
 
 Launch codes and temporary tokens must never be stored in URLs, notebooks,
 files, analytics, or logs. Browser fragments are removed before same-origin POST
-exchange, but proxies must still avoid request-body logging.
+exchange, but proxies must still avoid request-body logging. The near-expiry
+confirmation is XSRF-protected and binds the current Hub user, candidate token,
+API URL, stored expiry, and launch code for five minutes. It does not prove that
+a running server received that token; process-local provenance is checked later.
 
 Reuse coordination is local to one Hub process. The exchange is serialized, and
 each live Hub user has a separate lifecycle lock. Running-server credential
 provenance is deliberately process-local, so the first launch after a Hub restart
 conservatively replaces a surviving server. Idle-culler and administrator actions
-remain outside these locks.
+remain outside these locks. Renewal extends every copy of the bearer token, while
+account status, provider availability, permissions, revocation, and expiry remain
+live datalab API checks. Data already loaded into memory or the persistent volume
+cannot be withdrawn retroactively.
 
 ## External JupyterHub
 

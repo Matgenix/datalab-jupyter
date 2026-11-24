@@ -1,8 +1,11 @@
 import asyncio
 import logging
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import patch
+from urllib.parse import urlencode
 
 from tornado import web
 from tornado.httputil import HTTPHeaders, HTTPServerRequest, parse_body_arguments
@@ -11,6 +14,7 @@ from datalab_jupyter.hub.authenticator import (
     DatalabAuthenticator,
     DatalabLoginHandler,
     _credential_fingerprint,
+    _should_offer_renewal,
 )
 
 
@@ -67,6 +71,7 @@ class _Spawner:
 
 class _User:
     url = "/user/test/"
+    name = "datalab-user-id"
 
     def __init__(self, spawner):
         self.spawners = {"": spawner}
@@ -101,6 +106,8 @@ class _Handler:
         known_provenance=True,
         login_error=None,
         login_result=True,
+        body_arguments=None,
+        stored_expires_at="2099-01-01T00:00:00+00:00",
     ):
         self.request = SimpleNamespace(
             path="/hub/datalab-login",
@@ -111,7 +118,10 @@ class _Handler:
         self.finished = None
         self.redirected_to = None
         self.code = code
+        self.body_arguments = body_arguments or {}
         self.login_calls = 0
+        self.candidate_seen = None
+        self.renewal_seen = None
         self.events = []
         self.stop_ready_after = stop_ready_after
         self.spawn_ready_after = spawn_ready_after
@@ -129,7 +139,9 @@ class _Handler:
             api_url="http://datalab-api:5001",
             exchange_lock=asyncio.Lock(),
         )
+        self.settings = {"cookie_secret": b"test-cookie-secret"}
         self.log = SimpleNamespace(warning=lambda *_args: None)
+        self.user.auth_state["expires_at"] = stored_expires_at
         if ready and known_provenance:
             self.spawner._datalab_credential_fingerprint = _credential_fingerprint(
                 "stale-token", self.authenticator.api_url
@@ -138,7 +150,9 @@ class _Handler:
             self.spawner._stop_future.on_complete = lambda: self.user.spawners.pop("", None)
 
     def get_body_argument(self, name, default):
-        return self.code if name == "datalab_launch_code" else default
+        if name == "datalab_launch_code":
+            return self.code
+        return self.body_arguments.get(name, default)
 
     def set_header(self, name, value):
         self.headers[name] = value
@@ -149,13 +163,15 @@ class _Handler:
     async def login_user(self):
         self.login_calls += 1
         self.events.append("login")
+        self.candidate_seen = self._datalab_candidate_token
+        self.renewal_seen = self._datalab_renew_existing_session
         if self.login_error is not None:
             raise self.login_error
         if not self.login_result:
             return None
         self._datalab_exchange = SimpleNamespace(
             tool_access_token=self.returned_token,
-            expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+            expires_at=(datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
             session_reused=self.session_reused,
             notebook_launch_code="selected-items-code" if self.selected_items else None,
         )
@@ -167,11 +183,23 @@ class _Handler:
         }
         return self.user
 
-    async def _authenticate_and_redirect(self, code):
-        await DatalabLoginHandler._authenticate_and_redirect(self, code)
+    async def _authenticate_and_redirect(self, code, **kwargs):
+        await DatalabLoginHandler._authenticate_and_redirect(self, code, **kwargs)
 
-    async def _candidate_token(self):
-        return await DatalabLoginHandler._candidate_token(self)
+    async def _candidate_state(self):
+        return await DatalabLoginHandler._candidate_state(self)
+
+    def _cookie_secret(self):
+        return DatalabLoginHandler._cookie_secret(self)
+
+    def _confirmation_mac(self, code, candidate):
+        return DatalabLoginHandler._confirmation_mac(self, code, candidate)
+
+    def _create_confirmation_binding(self, code, candidate):
+        return DatalabLoginHandler._create_confirmation_binding(self, code, candidate)
+
+    def _require_confirmation_binding(self, code, candidate, binding):
+        return DatalabLoginHandler._require_confirmation_binding(self, code, candidate, binding)
 
     def _lifecycle_lock(self, user):
         return DatalabLoginHandler._lifecycle_lock(user)
@@ -245,6 +273,16 @@ class _Handler:
 
 
 class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
+    def test_renewal_prompt_window_has_exact_one_hour_boundary(self):
+        now = datetime.now(timezone.utc)
+
+        self.assertFalse(
+            _should_offer_renewal((now + timedelta(hours=1, microseconds=1)).isoformat(), now=now)
+        )
+        self.assertTrue(_should_offer_renewal((now + timedelta(hours=1)).isoformat(), now=now))
+        self.assertTrue(_should_offer_renewal((now + timedelta(seconds=1)).isoformat(), now=now))
+        self.assertFalse(_should_offer_renewal(now.isoformat(), now=now))
+
     async def test_get_renders_bootstrap_without_attempting_login(self):
         handler = _Handler()
 
@@ -262,6 +300,138 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
             await DatalabLoginHandler.post(handler)
 
         self.assertEqual(raised.exception.status_code, 403)
+        self.assertEqual(handler.login_calls, 0)
+        self.assertEqual(handler.headers["Cache-Control"], "no-store")
+        self.assertEqual(handler.headers["Referrer-Policy"], "no-referrer")
+        self.assertIn("default-src 'none'", handler.headers["Content-Security-Policy"])
+
+    async def test_near_expiry_candidate_requires_an_explicit_bound_choice(self):
+        expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        handler = _Handler(stored_expires_at=expires_at)
+
+        await DatalabLoginHandler.post(handler)
+
+        self.assertEqual(handler.login_calls, 0)
+        self.assertIn("Extend Datalab access and open JupyterLab", handler.finished)
+        self.assertIn("Continue without extending", handler.finished)
+        self.assertIn('name="datalab_launch_code" value="secret"', handler.finished)
+        self.assertNotIn("stale-token", handler.finished)
+        self.assertEqual(handler.headers["Cache-Control"], "no-store")
+        self.assertEqual(handler.headers["Referrer-Policy"], "no-referrer")
+        self.assertIn("form-action 'self'", handler.headers["Content-Security-Policy"])
+
+    async def test_both_confirmation_choices_reuse_the_bound_candidate(self):
+        expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+        for choice, expected in (("false", False), ("true", True)):
+            with self.subTest(choice=choice):
+                handler = _Handler(stored_expires_at=expires_at)
+                candidate = await handler._candidate_state()
+                binding = handler._create_confirmation_binding("secret", candidate)
+                handler.body_arguments = {
+                    "renew_existing_session": choice,
+                    "renewal_binding": binding,
+                }
+
+                await DatalabLoginHandler.post(handler)
+
+                self.assertEqual(handler.login_calls, 1)
+                self.assertEqual(handler.events[0], "login")
+                self.assertEqual(handler.candidate_seen, "stale-token")
+                self.assertIs(handler.renewal_seen, expected)
+                self.assertFalse(hasattr(handler, "_datalab_renew_existing_session"))
+
+    async def test_changed_confirmation_state_fails_before_consuming_the_grant(self):
+        expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+        handler = _Handler(stored_expires_at=expires_at)
+        candidate = await handler._candidate_state()
+        binding = handler._create_confirmation_binding("secret", candidate)
+        handler.user.auth_state["expires_at"] = (
+            datetime.now(timezone.utc) + timedelta(minutes=20)
+        ).isoformat()
+        handler.body_arguments = {
+            "renew_existing_session": "true",
+            "renewal_binding": binding,
+        }
+
+        with self.assertRaises(web.HTTPError) as raised:
+            await DatalabLoginHandler.post(handler)
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(handler.login_calls, 0)
+
+    async def test_confirmation_binding_rejects_code_user_token_and_api_tampering(self):
+        expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+        cases = (
+            ("code", lambda handler: setattr(handler, "code", "different-code")),
+            ("user", lambda handler: setattr(handler.user, "name", "different-user")),
+            (
+                "token",
+                lambda handler: handler.user.auth_state.update(
+                    tool_access_token="different-token"  # noqa: S106
+                ),
+            ),
+            ("api", lambda handler: handler.user.auth_state.update(api_url="https://other.test")),
+        )
+        for name, tamper in cases:
+            with self.subTest(name=name):
+                handler = _Handler(stored_expires_at=expires_at)
+                candidate = await handler._candidate_state()
+                binding = handler._create_confirmation_binding("secret", candidate)
+                tamper(handler)
+                handler.body_arguments = {
+                    "renew_existing_session": "true",
+                    "renewal_binding": binding,
+                }
+
+                with self.assertRaises(web.HTTPError) as raised:
+                    await DatalabLoginHandler.post(handler)
+
+                self.assertEqual(raised.exception.status_code, 409)
+                self.assertEqual(handler.login_calls, 0)
+
+    async def test_expired_candidate_and_invalid_action_do_not_consume_the_grant(self):
+        expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+        handler = _Handler(stored_expires_at=expires_at)
+        candidate = await handler._candidate_state()
+        binding = handler._create_confirmation_binding("secret", candidate)
+        handler.user.auth_state["expires_at"] = "2000-01-01T00:00:00+00:00"
+        handler.body_arguments = {
+            "renew_existing_session": "true",
+            "renewal_binding": binding,
+        }
+
+        with self.assertRaises(web.HTTPError) as raised:
+            await DatalabLoginHandler.post(handler)
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(handler.login_calls, 0)
+
+        handler = _Handler(stored_expires_at=expires_at)
+        handler.body_arguments = {
+            "renew_existing_session": "yes",
+            "renewal_binding": "not-a-binding",
+        }
+        with self.assertRaises(web.HTTPError) as raised:
+            await DatalabLoginHandler.post(handler)
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertEqual(handler.login_calls, 0)
+
+    async def test_confirmation_binding_expires_after_five_minutes(self):
+        expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+        handler = _Handler(stored_expires_at=expires_at)
+        candidate = await handler._candidate_state()
+        binding = handler._create_confirmation_binding("secret", candidate)
+        handler.body_arguments = {
+            "renew_existing_session": "true",
+            "renewal_binding": binding,
+        }
+
+        with (
+            patch("tornado.web.time.time", return_value=time.time() + 301),
+            self.assertRaises(web.HTTPError) as raised,
+        ):
+            await DatalabLoginHandler.post(handler)
+
+        self.assertEqual(raised.exception.status_code, 409)
         self.assertEqual(handler.login_calls, 0)
 
     async def test_ready_server_is_replaced_before_selected_items_redirect(self):
@@ -388,11 +558,13 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_candidate_comes_only_from_valid_current_auth_state(self):
         handler = _Handler()
 
-        self.assertEqual(await handler._candidate_token(), "stale-token")
+        candidate = await handler._candidate_state()
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate.token, "stale-token")
         handler.user.auth_state["expires_at"] = "2000-01-01T00:00:00+00:00"
-        self.assertIsNone(await handler._candidate_token())
+        self.assertIsNone(await handler._candidate_state())
         handler.current_user = None
-        self.assertIsNone(await handler._candidate_token())
+        self.assertIsNone(await handler._candidate_state())
 
     async def test_failed_exchange_does_not_stop_a_ready_server_and_releases_gate(self):
         handler = _Handler(ready=True, login_result=False)
@@ -547,6 +719,7 @@ class _PreparedLoginHandler(DatalabLoginHandler):
 
     async def login_user(self, data=None):
         self.settings["candidate_seen"] = self._datalab_candidate_token
+        self.settings["renewal_seen"] = self._datalab_renew_existing_session
         target_user = self.settings["target_user"]
         target_user.auth_state = {
             "tool_access_token": "target-token",
@@ -588,6 +761,7 @@ class PreparedHandlerIntegrationTests(unittest.IsolatedAsyncioTestCase):
             hub=SimpleNamespace(base_url="/hub/"),
             log=logging.getLogger(__name__),
             candidate_seen=None,
+            cookie_secret=b"test-cookie-secret",
         )
         headers = HTTPHeaders({"Content-Type": "application/x-www-form-urlencoded"})
         body = b"datalab_launch_code=launch-code"
@@ -608,3 +782,79 @@ class PreparedHandlerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(target_user.auth_state["tool_access_token"], "target-token")
         self.assertIn("/user/test/lab/workspaces/", handler.redirected_to[0])
         self.assertFalse(handler.redirected_to[1])
+
+    async def test_confirmation_post_requires_a_valid_xsrf_token(self):
+        existing_user = _User(_Spawner())
+        existing_user.auth_state["expires_at"] = (
+            datetime.now(timezone.utc) + timedelta(minutes=30)
+        ).isoformat()
+        target_user = _User(_Spawner())
+        target_user.spawners = {}
+        application = web.Application(
+            authenticator=SimpleNamespace(
+                api_url="http://datalab-api:5001",
+                exchange_lock=asyncio.Lock(),
+            ),
+            existing_user=existing_user,
+            target_user=target_user,
+            statsd=SimpleNamespace(incr=lambda _name: None),
+            hub=SimpleNamespace(base_url="/hub/"),
+            log=logging.getLogger(__name__),
+            candidate_seen=None,
+            renewal_seen=None,
+            cookie_secret=b"test-cookie-secret",
+            xsrf_cookies=True,
+        )
+        fake_handler = _Handler(stored_expires_at=existing_user.auth_state["expires_at"])
+        candidate = await fake_handler._candidate_state()
+        binding = fake_handler._create_confirmation_binding("launch-code", candidate)
+        confirmation = {
+            "datalab_launch_code": "launch-code",
+            "renewal_binding": binding,
+            "renew_existing_session": "true",
+        }
+        bootstrap_request = HTTPServerRequest(
+            method="GET",
+            uri="/hub/datalab-login",
+            connection=SimpleNamespace(set_close_callback=lambda _callback: None),
+        )
+        bootstrap_handler = _PreparedLoginHandler(application, bootstrap_request)
+        await bootstrap_handler.prepare()
+        xsrf_token = bootstrap_handler.xsrf_token.decode()
+        headers = HTTPHeaders(
+            {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Cookie": f"_xsrf={xsrf_token}",
+            }
+        )
+
+        def prepared_handler(form):
+            body = urlencode(form).encode()
+            request = HTTPServerRequest(
+                method="POST",
+                uri="/hub/datalab-login",
+                headers=headers,
+                body=body,
+                connection=SimpleNamespace(set_close_callback=lambda _callback: None),
+            )
+            parse_body_arguments(
+                headers["Content-Type"],
+                body,
+                request.body_arguments,
+                request.files,
+            )
+            request.arguments.update(request.body_arguments)
+            return _PreparedLoginHandler(application, request)
+
+        missing_handler = prepared_handler(confirmation)
+        with self.assertRaises(web.HTTPError) as raised:
+            await missing_handler.prepare()
+        self.assertEqual(raised.exception.status_code, 403)
+        self.assertIsNone(application.settings["candidate_seen"])
+
+        valid_handler = prepared_handler({**confirmation, "_xsrf": xsrf_token})
+        await valid_handler.prepare()
+        await valid_handler.post()
+
+        self.assertEqual(application.settings["candidate_seen"], "stale-token")
+        self.assertIs(application.settings["renewal_seen"], True)

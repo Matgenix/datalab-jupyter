@@ -2,7 +2,7 @@ import re
 from types import SimpleNamespace
 from unittest import TestCase
 
-from datalab_jupyter.fragment_post import render_fragment_post
+from datalab_jupyter.fragment_post import render_fragment_post, render_renewal_confirmation
 
 
 class _Handler:
@@ -46,3 +46,27 @@ class FragmentPostTests(TestCase):
     def test_bootstrap_rejects_an_invalid_field_name(self):
         with self.assertRaises(ValueError):
             render_fragment_post(_Handler(), "unexpected-field")
+
+    def test_confirmation_escapes_bound_values_and_uses_protected_post(self):
+        handler = _Handler()
+        handler.request.path = '/hub/datalab-login"><script>'
+
+        page = render_renewal_confirmation(
+            handler,
+            'launch"><secret',
+            'signed"><binding',
+        )
+
+        self.assertIn('method="post" action="/hub/datalab-login&quot;&gt;&lt;script&gt;"', page)
+        self.assertIn('name="_xsrf" value="test-xsrf-token"', page)
+        self.assertIn('value="launch&quot;&gt;&lt;secret"', page)
+        self.assertIn('value="signed&quot;&gt;&lt;binding"', page)
+        self.assertIn('name="renew_existing_session" value="false"', page)
+        self.assertIn('name="renew_existing_session" value="true"', page)
+        self.assertNotIn("<secret", page)
+        self.assertEqual(handler.headers["Cache-Control"], "no-store")
+        self.assertEqual(handler.headers["Referrer-Policy"], "no-referrer")
+        self.assertIn("default-src 'none'", handler.headers["Content-Security-Policy"])
+        self.assertIn("form-action 'self'", handler.headers["Content-Security-Policy"])
+        self.assertIn("base-uri 'none'", handler.headers["Content-Security-Policy"])
+        self.assertIn("frame-ancestors 'none'", handler.headers["Content-Security-Policy"])

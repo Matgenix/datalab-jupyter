@@ -1,4 +1,4 @@
-"""Render a same-origin bootstrap that moves one URL fragment value into a POST."""
+"""Render protected same-origin pages for the JupyterLab launch handoff."""
 
 import html
 import json
@@ -9,6 +9,23 @@ from typing import Any
 _FIELD_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+def _xsrf_token(handler: Any) -> str:
+    token = handler.xsrf_token
+    if isinstance(token, bytes):
+        token = token.decode("utf-8")
+    return html.escape(str(token), quote=True)
+
+
+def set_launch_page_headers(handler: Any, *, script_nonce: str | None = None) -> None:
+    directives = ["default-src 'none'"]
+    if script_nonce is not None:
+        directives.append(f"script-src 'nonce-{script_nonce}'")
+    directives.extend(("form-action 'self'", "base-uri 'none'", "frame-ancestors 'none'"))
+    handler.set_header("Cache-Control", "no-store")
+    handler.set_header("Referrer-Policy", "no-referrer")
+    handler.set_header("Content-Security-Policy", "; ".join(directives))
+
+
 def render_fragment_post(handler: Any, fragment_field: str) -> str:
     """Return a no-store page that submits one fragment field with XSRF protection."""
 
@@ -16,28 +33,11 @@ def render_fragment_post(handler: Any, fragment_field: str) -> str:
         raise ValueError("fragment_field must be a valid form field name")
 
     nonce = secrets.token_urlsafe(18)
-    xsrf_token = handler.xsrf_token
-    if isinstance(xsrf_token, bytes):
-        xsrf_token = xsrf_token.decode("utf-8")
-
-    handler.set_header("Cache-Control", "no-store")
-    handler.set_header("Referrer-Policy", "no-referrer")
-    handler.set_header(
-        "Content-Security-Policy",
-        "; ".join(
-            (
-                "default-src 'none'",
-                f"script-src 'nonce-{nonce}'",
-                "form-action 'self'",
-                "base-uri 'none'",
-                "frame-ancestors 'none'",
-            )
-        ),
-    )
+    set_launch_page_headers(handler, script_nonce=nonce)
 
     action = html.escape(handler.request.path, quote=True)
     field = html.escape(fragment_field, quote=True)
-    token = html.escape(str(xsrf_token), quote=True)
+    token = _xsrf_token(handler)
     script_field = json.dumps(fragment_field)
     return rf"""<!doctype html>
 <html lang="en">
@@ -74,6 +74,38 @@ if (
   form.submit();
 }}
 </script>
+</body>
+</html>
+"""
+
+
+def render_renewal_confirmation(handler: Any, launch_code: str, binding: str) -> str:
+    """Return the explicit near-expiry credential renewal choice."""
+
+    set_launch_page_headers(handler)
+    action = html.escape(handler.request.path, quote=True)
+    token = _xsrf_token(handler)
+    code = html.escape(launch_code, quote=True)
+    signed_binding = html.escape(binding, quote=True)
+    return f"""<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Open JupyterLab</title></head>
+<body>
+<h1>Open JupyterLab</h1>
+<p>The stored Datalab access credential associated with this JupyterHub login is nearing expiry.</p>
+<p>Extending access preserves the same server and in-memory computation only when the credential
+and running-server provenance match. Otherwise the server may restart. Continuing without
+extension can also rotate the credential and restart the server when fewer than ten minutes
+remain.</p>
+<p>Extending access does not reset the server idle timeout or maximum server age. An invalid
+credential or one at its hard age cap will be replaced and can restart the server.</p>
+<form method="post" action="{action}">
+<input type="hidden" name="_xsrf" value="{token}">
+<input type="hidden" name="datalab_launch_code" value="{code}">
+<input type="hidden" name="renewal_binding" value="{signed_binding}">
+<button type="submit" name="renew_existing_session" value="false">Continue without extending</button>
+<button type="submit" name="renew_existing_session" value="true">Extend Datalab access and open JupyterLab</button>
+</form>
 </body>
 </html>
 """

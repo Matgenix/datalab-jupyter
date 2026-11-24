@@ -77,7 +77,9 @@ class JupyterToolProvider(ToolProvider):
     def launch(self, context: ToolContext, grants: ToolLaunchGrantIssuer) -> str:
         code = grants.issue(
             self.settings.client_id,
+            lifetime_seconds=5 * 60,
             session_policy=ToolSessionPolicy.REUSE_OR_REPLACE,
+            allow_session_renewal=True,
         )
         return _login_url(code, self.settings)
 
@@ -95,11 +97,19 @@ def exchange_jupyter_launch_code():
     """Exchange one launch code for a delegated datalab tool session."""
 
     payload = request.get_json(silent=True)
-    if not isinstance(payload, dict) or set(payload) != {"code"}:
+    allowed_fields = {"code", "renew_existing_session"}
+    if (
+        not isinstance(payload, dict)
+        or "code" not in payload
+        or not set(payload).issubset(allowed_fields)
+    ):
         return jsonify({"status": "error", "message": "Invalid exchange request"}), 400
     code = payload.get("code")
+    renew_existing_session = payload.get("renew_existing_session", False)
     if not isinstance(code, str) or not code:
         return jsonify({"status": "error", "message": "A launch code is required"}), 400
+    if type(renew_existing_session) is not bool:
+        return jsonify({"status": "error", "message": "Invalid renewal request"}), 400
 
     settings = load_plugin_settings()
     candidate = request.headers.get("DATALAB-EXISTING-TOOL-TOKEN")
@@ -112,6 +122,7 @@ def exchange_jupyter_launch_code():
         tool_session_lifetime_seconds=24 * 60 * 60,
         candidate_tool_access_token=candidate,
         minimum_reuse_lifetime_seconds=10 * 60,
+        renew_existing_session=renew_existing_session,
     )
     if exchange is None:
         return jsonify({"status": "error", "message": "Invalid or expired launch code"}), 400
@@ -124,6 +135,7 @@ def exchange_jupyter_launch_code():
         "tool_access_token": exchange.tool_session.tool_access_token,
         "expires_at": exchange.tool_session.expires_at.isoformat(),
         "session_reused": exchange.session_reused,
+        "session_renewed": exchange.session_renewed,
     }
     if exchange.selection is not None:
         response_payload["notebook_launch_code"] = issue_tool_selection_code(

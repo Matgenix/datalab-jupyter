@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Offer an explicit, five-minute-bound confirmation when a stored datalab
+  credential has one hour or less remaining. Successful renewal advances its
+  authoritative expiry without changing the token or restarting a compatible
+  server; capped or invalid credentials retain the controlled replacement path.
 - Open every successful launch in a distinct native JupyterLab workspace. Give
   each selected-items launch a randomly named notebook, dedicated kernel, and
   Jupyter session, with request-owned cleanup after fatal partial failures.

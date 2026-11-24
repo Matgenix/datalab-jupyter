@@ -3,7 +3,7 @@ from base64 import b64encode
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest import TestCase, skipUnless
-from unittest.mock import patch
+from unittest.mock import create_autospec, patch
 
 TOOLS_API_AVAILABLE = (
     importlib.util.find_spec("pydatalab") is not None
@@ -12,7 +12,7 @@ TOOLS_API_AVAILABLE = (
 
 if TOOLS_API_AVAILABLE:
     from flask import Flask
-    from pydatalab.tools import ToolSessionPolicy
+    from pydatalab.tools import ToolLaunchGrantIssuer, ToolSessionPolicy
 
     from datalab_jupyter.plugin import provider as provider_module
     from datalab_jupyter.plugin.provider import JUPYTER_BLUEPRINT, JupyterToolProvider
@@ -45,21 +45,23 @@ class ProviderTests(TestCase):
         self.assertIn("#datalab_launch_code=launch+code%2Fvalue", login_url)
         self.assertNotIn("?datalab_launch_code=", login_url)
 
-    def test_launch_requests_reuse_or_replace_with_the_default_lifetime(self):
+    def test_launch_requests_reuse_or_replace_with_renewal_permission(self):
         settings = SimpleNamespace(
             client_id="jupyter-client",
             browser_url=lambda _app_url: "https://jupyter.example.test/jupyter",
         )
-        grants = SimpleNamespace(issue=lambda *args, **kwargs: "launch-code")
+        grants = create_autospec(ToolLaunchGrantIssuer, instance=True)
+        grants.issue.return_value = "launch-code"
 
         with patch.object(provider_module, "load_plugin_settings", return_value=settings):
             provider = JupyterToolProvider()
-        with patch.object(grants, "issue", wraps=grants.issue) as issue_mock:
-            provider.launch(SimpleNamespace(), grants)
+        provider.launch(SimpleNamespace(), grants)
 
-        issue_mock.assert_called_once_with(
+        grants.issue.assert_called_once_with(
             "jupyter-client",
+            lifetime_seconds=5 * 60,
             session_policy=ToolSessionPolicy.REUSE_OR_REPLACE,
+            allow_session_renewal=True,
         )
 
     def test_exchange_requires_service_credentials_and_uses_service_helper(self):
@@ -80,6 +82,7 @@ class ProviderTests(TestCase):
             ),
             selection=None,
             session_reused=True,
+            session_renewed=True,
         )
 
         with (
@@ -87,6 +90,7 @@ class ProviderTests(TestCase):
             patch.object(
                 provider_module,
                 "exchange_service_launch_code",
+                autospec=True,
                 return_value=exchange,
             ) as exchange_mock,
         ):
@@ -107,7 +111,7 @@ class ProviderTests(TestCase):
             invalid_credentials = b64encode(b"jupyter-client:wrong-secret").decode()
             response = client.post(
                 "/tool/exchange",
-                json={"code": "launch-code"},
+                json={"code": "launch-code", "renew_existing_session": True},
                 headers={"Authorization": f"Basic {invalid_credentials}"},
             )
             self.assertEqual(response.status_code, 401)
@@ -118,7 +122,7 @@ class ProviderTests(TestCase):
             ).decode()
             response = client.post(
                 "/tool/exchange",
-                json={"code": "launch-code"},
+                json={"code": "launch-code", "renew_existing_session": True},
                 headers={
                     "Authorization": f"Basic {valid_credentials}",
                     "DATALAB-EXISTING-TOOL-TOKEN": "existing-token",
@@ -133,8 +137,13 @@ class ProviderTests(TestCase):
                 tool_session_lifetime_seconds=24 * 60 * 60,
                 candidate_tool_access_token="existing-token",  # noqa: S106
                 minimum_reuse_lifetime_seconds=10 * 60,
+                renew_existing_session=True,
             )
             self.assertTrue(response.get_json()["session_reused"])
+            self.assertTrue(response.get_json()["session_renewed"])
+            self.assertEqual(
+                response.get_json()["expires_at"], exchange.tool_session.expires_at.isoformat()
+            )
             self.assertEqual(response.headers["Cache-Control"], "no-store")
 
     def test_exchange_rejects_malformed_or_unsupported_json(self):
@@ -145,7 +154,9 @@ class ProviderTests(TestCase):
         credentials = b64encode(f"{settings.client_id}:{settings.client_secret}".encode()).decode()
         with (
             patch.object(provider_module, "load_plugin_settings", return_value=settings),
-            patch.object(provider_module, "exchange_service_launch_code") as exchange_mock,
+            patch.object(
+                provider_module, "exchange_service_launch_code", autospec=True
+            ) as exchange_mock,
         ):
             provider = JupyterToolProvider()
             app = Flask(__name__)
@@ -158,7 +169,14 @@ class ProviderTests(TestCase):
                 return None
 
             client = app.test_client()
-            for payload in (None, [], {}, {"code": "value", "token": "body-token"}):
+            for payload in (
+                None,
+                [],
+                {},
+                {"code": "value", "token": "body-token"},
+                {"code": "value", "renew_existing_session": 1},
+                {"code": "value", "renew_existing_session": "true"},
+            ):
                 with self.subTest(payload=payload):
                     response = client.post(
                         "/tool/exchange",

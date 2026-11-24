@@ -2,9 +2,10 @@
 
 import asyncio
 import hashlib
+import hmac
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlencode
 
@@ -15,7 +16,11 @@ from jupyterhub.utils import url_path_join
 from tornado import web
 from traitlets import Unicode
 
-from datalab_jupyter.fragment_post import render_fragment_post
+from datalab_jupyter.fragment_post import (
+    render_fragment_post,
+    render_renewal_confirmation,
+    set_launch_page_headers,
+)
 from datalab_jupyter.urls import workspace_url
 
 EXCHANGE_PATH = "/v0.1/tools/plugins/jupyter/exchange"
@@ -23,6 +28,10 @@ REUSE_CANDIDATE_HEADER = "DATALAB-EXISTING-TOOL-TOKEN"
 _EXCHANGE_TIMEOUT_SECONDS = 10.0
 _CREDENTIAL_FINGERPRINT_ATTRIBUTE = "_datalab_credential_fingerprint"
 _CREDENTIAL_FINGERPRINT_DOMAIN = b"datalab-jupyter:server-credential:v1\0"
+_CONFIRMATION_DOMAIN = b"datalab-jupyter:renewal-confirmation:v1\0"
+_CONFIRMATION_NAME = "datalab-jupyter-renewal"
+_CONFIRMATION_MAX_AGE_DAYS = 5 * 60 / (24 * 60 * 60)
+_RENEWAL_PROMPT_THRESHOLD = timedelta(hours=1)
 
 
 def _expiration(value: str) -> datetime:
@@ -51,6 +60,22 @@ def _credential_fingerprint(token: str, api_url: str) -> str:
 
 
 @dataclass(frozen=True)
+class _CandidateState:
+    username: str
+    token: str
+    api_url: str
+    expires_at: str
+
+
+def _should_offer_renewal(expires_at: str, *, now: datetime | None = None) -> bool:
+    """Return whether a valid candidate is within the explicit-renewal window."""
+
+    current_time = now or datetime.now(timezone.utc)
+    remaining = _expiration(expires_at) - current_time
+    return timedelta(0) < remaining <= _RENEWAL_PROMPT_THRESHOLD
+
+
+@dataclass(frozen=True)
 class _ExchangeResponse:
     user_id: str
     display_name: str | None
@@ -59,6 +84,7 @@ class _ExchangeResponse:
     tool_access_token: str
     expires_at: str
     session_reused: bool = False
+    session_renewed: bool = False
     notebook_launch_code: str | None = None
 
     @classmethod
@@ -73,7 +99,7 @@ class _ExchangeResponse:
             "tool_access_token",
             "expires_at",
         }
-        allowed = required | {"session_reused", "notebook_launch_code"}
+        allowed = required | {"session_reused", "session_renewed", "notebook_launch_code"}
         if not required.issubset(payload) or not set(payload).issubset(allowed):
             raise ValueError("response omitted required fields")
 
@@ -84,6 +110,7 @@ class _ExchangeResponse:
         tool_access_token = payload["tool_access_token"]
         expires_at = payload["expires_at"]
         session_reused = payload.get("session_reused", False)
+        session_renewed = payload.get("session_renewed", False)
         notebook_launch_code = payload.get("notebook_launch_code")
         if (
             not isinstance(user_id, str)
@@ -98,6 +125,9 @@ class _ExchangeResponse:
             or not tool_access_token
             or not isinstance(expires_at, str)
             or type(session_reused) is not bool
+            or type(session_renewed) is not bool
+            or session_renewed
+            and not session_reused
             or notebook_launch_code is not None
             and (not isinstance(notebook_launch_code, str) or not notebook_launch_code)
         ):
@@ -111,6 +141,7 @@ class _ExchangeResponse:
             tool_access_token=tool_access_token,
             expires_at=expires_at,
             session_reused=session_reused,
+            session_renewed=session_renewed,
             notebook_launch_code=notebook_launch_code,
         )
 
@@ -126,14 +157,38 @@ class DatalabLoginHandler(LoginHandler):
     async def post(self) -> None:
         """Authenticate from a launch code submitted in the XSRF-protected body."""
 
+        set_launch_page_headers(self)
         self.statsd.incr("login.request")
         code = (self.get_body_argument("datalab_launch_code", None) or "").strip()
         if not code:
             raise web.HTTPError(403, "Invalid or expired datalab launch code")
 
-        await self._authenticate_and_redirect(code)
+        renewal_choice = self.get_body_argument("renew_existing_session", None)
+        renewal_binding = self.get_body_argument("renewal_binding", None)
+        if renewal_choice is None and renewal_binding is None:
+            candidate = await self._candidate_state()
+            if candidate is not None and _should_offer_renewal(candidate.expires_at):
+                binding = self._create_confirmation_binding(code, candidate)
+                self.finish(render_renewal_confirmation(self, code, binding))
+                return
+            await self._authenticate_and_redirect(code, renew_existing_session=False)
+            return
 
-    async def _authenticate_and_redirect(self, code: str) -> None:
+        if renewal_choice not in {"true", "false"} or not renewal_binding:
+            raise web.HTTPError(400, "Invalid Datalab access extension choice")
+        await self._authenticate_and_redirect(
+            code,
+            renew_existing_session=renewal_choice == "true",
+            confirmation_binding=renewal_binding,
+        )
+
+    async def _authenticate_and_redirect(
+        self,
+        code: str,
+        *,
+        renew_existing_session: bool,
+        confirmation_binding: str | None = None,
+    ) -> None:
         """Exchange one code, reconcile the user server, and complete the handoff."""
 
         self.set_header("Cache-Control", "no-store")
@@ -141,10 +196,20 @@ class DatalabLoginHandler(LoginHandler):
         self._datalab_launch_code = code
         try:
             async with self.authenticator.exchange_lock:
-                self._datalab_candidate_token = await self._candidate_token()
+                candidate = await self._candidate_state()
+                if confirmation_binding is not None:
+                    self._require_confirmation_binding(code, candidate, confirmation_binding)
+                self._datalab_candidate_token = candidate.token if candidate is not None else None
+                self._datalab_renew_existing_session = renew_existing_session
                 user = await self.login_user()
         finally:
-            del self._datalab_launch_code
+            for attribute in (
+                "_datalab_launch_code",
+                "_datalab_candidate_token",
+                "_datalab_renew_existing_session",
+            ):
+                if hasattr(self, attribute):
+                    delattr(self, attribute)
         if user is None:
             raise web.HTTPError(403, "Invalid or expired datalab launch code")
 
@@ -177,31 +242,78 @@ class DatalabLoginHandler(LoginHandler):
                 )
             self.redirect(next_url, permanent=False)
 
-    async def _candidate_token(self) -> str | None:
-        """Read a reusable token only from the authenticated Hub user's state."""
+    async def _candidate_state(self) -> _CandidateState | None:
+        """Read a reusable credential only from the authenticated Hub user's state."""
 
         user = self.current_user
         if user is None:
             return None
         try:
             auth_state = await user.get_auth_state()
+            username = user.name
             token = auth_state.get("tool_access_token") if auth_state else None
             api_url = auth_state.get("api_url") if auth_state else None
             expires_at = auth_state.get("expires_at") if auth_state else None
             if (
-                not isinstance(token, str)
+                not isinstance(username, str)
+                or not username
+                or not isinstance(token, str)
                 or not token
                 or api_url != self.authenticator.api_url.rstrip("/")
                 or not isinstance(expires_at, str)
                 or _is_expired(expires_at)
             ):
                 return None
-            return token
-        except (KeyError, TypeError, ValueError):
+            return _CandidateState(username, token, api_url, expires_at)
+        except (AttributeError, KeyError, TypeError, ValueError):
             return None
         except Exception as exc:
             self.log.warning("Unable to read existing datalab authentication state: %s", exc)
             return None
+
+    def _cookie_secret(self) -> bytes:
+        secret = self.settings["cookie_secret"]
+        return secret.encode() if isinstance(secret, str) else secret
+
+    def _confirmation_mac(self, code: str, candidate: _CandidateState) -> bytes:
+        payload = json.dumps(
+            [
+                candidate.username,
+                code,
+                candidate.token,
+                candidate.api_url,
+                candidate.expires_at,
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+        return hmac.digest(self._cookie_secret(), _CONFIRMATION_DOMAIN + payload, "sha256")
+
+    def _create_confirmation_binding(self, code: str, candidate: _CandidateState) -> str:
+        signed = web.create_signed_value(
+            self._cookie_secret(),
+            _CONFIRMATION_NAME,
+            self._confirmation_mac(code, candidate),
+        )
+        return signed.decode()
+
+    def _require_confirmation_binding(
+        self,
+        code: str,
+        candidate: _CandidateState | None,
+        binding: str,
+    ) -> None:
+        if candidate is None:
+            raise web.HTTPError(409, "Datalab access changed; launch JupyterLab again")
+        signed_mac = web.decode_signed_value(
+            self._cookie_secret(),
+            _CONFIRMATION_NAME,
+            binding,
+            max_age_days=_CONFIRMATION_MAX_AGE_DAYS,
+        )
+        expected_mac = self._confirmation_mac(code, candidate)
+        if signed_mac is None or not hmac.compare_digest(signed_mac, expected_mac):
+            raise web.HTTPError(409, "Datalab access changed; launch JupyterLab again")
 
     @staticmethod
     def _lifecycle_lock(user: Any) -> asyncio.Lock:
@@ -389,6 +501,7 @@ class DatalabAuthenticator(Authenticator):
 
         exchange_url = f"{self.api_url.rstrip('/')}/{EXCHANGE_PATH.lstrip('/')}"
         candidate = getattr(handler, "_datalab_candidate_token", None)
+        renew_existing_session = getattr(handler, "_datalab_renew_existing_session", False)
         headers = {REUSE_CANDIDATE_HEADER: candidate} if candidate else None
         try:
             async with httpx.AsyncClient(timeout=_EXCHANGE_TIMEOUT_SECONDS) as client:
@@ -397,7 +510,10 @@ class DatalabAuthenticator(Authenticator):
                 async with asyncio.timeout(_EXCHANGE_TIMEOUT_SECONDS):
                     response = await client.post(
                         exchange_url,
-                        json={"code": code},
+                        json={
+                            "code": code,
+                            "renew_existing_session": renew_existing_session,
+                        },
                         auth=httpx.BasicAuth(self.client_id, self.client_secret),
                         headers=headers,
                     )

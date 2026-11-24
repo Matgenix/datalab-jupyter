@@ -33,6 +33,7 @@ class ExchangeResponseTests(TestCase):
 
         self.assertEqual(response.group_ids, ("group-one",))
         self.assertFalse(response.session_reused)
+        self.assertFalse(response.session_renewed)
         self.assertFalse(_is_expired(response.expires_at))
 
     def test_exchange_response_rejects_invalid_fields(self):
@@ -42,6 +43,7 @@ class ExchangeResponseTests(TestCase):
             ("tool_access_token", ""),
             ("expires_at", "not-a-date"),
             ("session_reused", 1),
+            ("session_renewed", 1),
             ("notebook_launch_code", ""),
         ]
         for field, value in invalid_values:
@@ -53,11 +55,16 @@ class ExchangeResponseTests(TestCase):
 
     def test_exchange_response_accepts_strict_optional_fields(self):
         payload = valid_payload()
-        payload.update(session_reused=True, notebook_launch_code="selection-code")
+        payload.update(
+            session_reused=True,
+            session_renewed=True,
+            notebook_launch_code="selection-code",
+        )
 
         response = _ExchangeResponse.from_payload(payload)
 
         self.assertTrue(response.session_reused)
+        self.assertTrue(response.session_renewed)
         self.assertEqual(response.notebook_launch_code, "selection-code")
 
         payload["unsupported"] = True
@@ -104,11 +111,16 @@ class AuthenticatorTests(IsolatedAsyncioTestCase):
 
     async def test_authenticate_sends_candidate_and_keeps_selection_request_local(self):
         payload = valid_payload()
-        payload.update(session_reused=True, notebook_launch_code="selection-code")
+        payload.update(
+            session_reused=True,
+            session_renewed=True,
+            notebook_launch_code="selection-code",
+        )
         requests = []
         handler = SimpleNamespace(
             _datalab_launch_code="launch-code",
             _datalab_candidate_token=payload["tool_access_token"],
+            _datalab_renew_existing_session=True,
         )
 
         with patch.object(
@@ -125,9 +137,31 @@ class AuthenticatorTests(IsolatedAsyncioTestCase):
             request_kwargs["headers"],
             {REUSE_CANDIDATE_HEADER: payload["tool_access_token"]},
         )
+        self.assertEqual(
+            request_kwargs["json"],
+            {"code": "launch-code", "renew_existing_session": True},
+        )
         self.assertEqual(authenticated["name"], f"datalab-{payload['user_id']}")
         self.assertNotIn("notebook_launch_code", authenticated["auth_state"])
+        self.assertEqual(authenticated["auth_state"]["expires_at"], payload["expires_at"])
         self.assertEqual(handler._datalab_exchange.notebook_launch_code, "selection-code")
+        self.assertTrue(handler._datalab_exchange.session_renewed)
+        self.assertNotIn("session_renewed", authenticated["auth_state"])
+
+    async def test_authenticate_rejects_renewed_without_reused(self):
+        payload = valid_payload()
+        payload["session_renewed"] = True
+        handler = SimpleNamespace(_datalab_launch_code="launch-code")
+
+        with patch.object(
+            authenticator_module.httpx,
+            "AsyncClient",
+            side_effect=lambda **kwargs: _AsyncClient(_Response(payload), [], **kwargs),
+        ):
+            with self.assertRaises(web.HTTPError) as raised:
+                await self.authenticator.authenticate(handler)
+
+        self.assertEqual(raised.exception.status_code, 502)
 
     async def test_authenticate_rejects_a_false_reuse_claim(self):
         payload = valid_payload()

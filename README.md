@@ -51,9 +51,20 @@ these selection variables.
 ### Sessions and files
 
 Launching JupyterLab again keeps an eligible running user server when datalab
-returns the exact delegated token already injected into it and that token has at
-least ten minutes remaining. Kernels, terminals, processes, unsaved in-memory
-state, and persistent files then continue unchanged.
+returns the exact delegated token already injected into it. When the stored
+credential has one hour or less remaining, the Hub asks whether to **Extend
+Datalab access and open JupyterLab** or **Continue without extending**. Extension
+uses a new 24-hour rolling horizon while preserving the token; the same token can
+never remain valid beyond seven days from its original creation.
+If the confirmation expires or reports that access changed, return to datalab
+and launch JupyterLab again.
+
+Continue normally reuses a credential with at least ten minutes remaining.
+Below that minimum, or when the candidate is invalid or at its hard age cap,
+datalab rotates the credential and the Hub replaces the server once. A matching
+renewed credential retains the server, kernels, terminals, processes, unsaved
+in-memory state, and persistent files. Missing server provenance after a Hub
+restart also causes one conservative replacement.
 
 Each successful launch opens a new native JupyterLab workspace. A workspace
 keeps its own browser layout, but it is not a separate server, security boundary,
@@ -73,10 +84,12 @@ discovered or cleaned up by this integration, and opening the same notebook in
 two workspaces does not provide kernel isolation.
 
 The Hub performs one controlled replacement when the token is fresh, invalid,
-near expiry, belongs to another API, or cannot be verified against the running
-server. Persistent files survive a replacement, but running and unsaved state
-does not. Save important work regularly and relaunch if a datalab request reports
-HTTP 401.
+too close to expiry for a non-renewing launch, belongs to another API, or cannot
+be verified against the running server. Persistent files survive a replacement,
+but running and unsaved state does not. Credential extension does not extend the
+Hub login cookie or reset the server idle timeout or maximum age. A server may
+keep computing after credential expiry while new datalab API calls fail. Save
+important work regularly and relaunch if a datalab request reports HTTP 401.
 
 The managed image includes SciPy, pandas, Matplotlib, seaborn, ipywidgets,
 lmfit, uncertainties, Pint, openpyxl, h5py, tqdm, and a compatible NumPy.
@@ -97,10 +110,10 @@ The distribution has three independently installable components:
 
 The provider issues a single-use launch grant. The Hub exchanges it with shared
 client credentials, optionally presenting the current encrypted token as a reuse
-candidate. It stores the authoritative temporary token in encrypted JupyterHub
-authentication state and injects it only into the matching user server. Browser
-handoffs carry launch codes in URL fragments and submit them through same-origin,
-XSRF-protected POST requests.
+or explicit-renewal candidate. It stores the authoritative temporary token and
+expiry in encrypted JupyterHub authentication state and injects the token only
+into the matching user server. Browser handoffs carry launch codes in URL
+fragments and submit them through same-origin, XSRF-protected POST requests.
 
 Provider, Hub, and server versions must be upgraded together. Installation does
 not itself start JupyterHub; the deployment chooses either the managed companion
