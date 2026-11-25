@@ -56,7 +56,7 @@ class PluginSettings:
         return "http://localhost:8000/jupyter"
 
 
-def load_plugin_settings() -> PluginSettings:
+def load_plugin_settings(*, allow_insecure_http: bool = False) -> PluginSettings:
     """Load and validate the provider settings from the environment."""
 
     client_id = _environment("DATALAB_JUPYTER_CLIENT_ID") or "datalab-jupyter"
@@ -64,10 +64,11 @@ def load_plugin_settings() -> PluginSettings:
     client_secret = raw_client_secret.strip()
     if not client_secret or client_secret != raw_client_secret or len(client_secret) < 32:
         raise ValueError("DATALAB_JUPYTER_CLIENT_SECRET must contain at least 32 characters")
-    allow_insecure = os.environ.get("DATALAB_JUPYTER_ALLOW_INSECURE_HTTP") == "true"
     return PluginSettings(
         client_id=client_id,
         client_secret=client_secret,
-        external_url=_http_base_url("DATALAB_JUPYTER_EXTERNAL_URL", allow_insecure=allow_insecure),
-        public_url=_http_base_url("DATALAB_JUPYTER_PUBLIC_URL", allow_insecure=allow_insecure),
+        external_url=_http_base_url(
+            "DATALAB_JUPYTER_EXTERNAL_URL", allow_insecure=allow_insecure_http
+        ),
+        public_url=_http_base_url("DATALAB_JUPYTER_PUBLIC_URL", allow_insecure=allow_insecure_http),
     )

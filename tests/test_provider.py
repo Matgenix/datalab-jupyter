@@ -3,7 +3,7 @@ from base64 import b64encode
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest import TestCase, skipUnless
-from unittest.mock import create_autospec, patch
+from unittest.mock import call, create_autospec, patch
 
 TOOLS_API_AVAILABLE = (
     importlib.util.find_spec("pydatalab") is not None
@@ -53,8 +53,14 @@ class ProviderTests(TestCase):
         grants = create_autospec(ToolLaunchGrantIssuer, instance=True)
         grants.issue.return_value = "launch-code"
 
-        with patch.object(provider_module, "load_plugin_settings", return_value=settings):
+        with (
+            patch.object(provider_module.CONFIG.TOOLS, "ALLOW_INSECURE_HTTP", True),
+            patch.object(
+                provider_module, "load_plugin_settings", return_value=settings
+            ) as settings_loader,
+        ):
             provider = JupyterToolProvider()
+        settings_loader.assert_called_once_with(allow_insecure_http=True)
         provider.launch(SimpleNamespace(), grants)
 
         grants.issue.assert_called_once_with(
@@ -86,7 +92,10 @@ class ProviderTests(TestCase):
         )
 
         with (
-            patch.object(provider_module, "load_plugin_settings", return_value=settings),
+            patch.object(provider_module.CONFIG.TOOLS, "ALLOW_INSECURE_HTTP", True),
+            patch.object(
+                provider_module, "load_plugin_settings", return_value=settings
+            ) as settings_loader,
             patch.object(
                 provider_module,
                 "exchange_service_launch_code",
@@ -145,6 +154,13 @@ class ProviderTests(TestCase):
                 response.get_json()["expires_at"], exchange.tool_session.expires_at.isoformat()
             )
             self.assertEqual(response.headers["Cache-Control"], "no-store")
+            self.assertEqual(
+                settings_loader.call_args_list,
+                [
+                    call(allow_insecure_http=True),
+                    call(allow_insecure_http=True),
+                ],
+            )
 
     def test_exchange_rejects_malformed_or_unsupported_json(self):
         settings = SimpleNamespace(

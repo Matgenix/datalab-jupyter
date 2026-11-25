@@ -60,7 +60,7 @@ class JupyterToolProvider(ToolProvider):
     route_auth = ToolRouteAuth.SERVICE
 
     def __init__(self) -> None:
-        self.settings = load_plugin_settings()
+        self.settings = load_plugin_settings(allow_insecure_http=CONFIG.TOOLS.ALLOW_INSECURE_HTTP)
 
     def authenticate_service_request(self) -> bool:
         """Authenticate the configured JupyterHub client."""
@@ -111,7 +111,7 @@ def exchange_jupyter_launch_code():
     if type(renew_existing_session) is not bool:
         return jsonify({"status": "error", "message": "Invalid renewal request"}), 400
 
-    settings = load_plugin_settings()
+    settings = load_plugin_settings(allow_insecure_http=CONFIG.TOOLS.ALLOW_INSECURE_HTTP)
     candidate = request.headers.get("DATALAB-EXISTING-TOOL-TOKEN")
     if candidate is not None and len(candidate) > _MAX_CANDIDATE_TOKEN_LENGTH:
         candidate = None

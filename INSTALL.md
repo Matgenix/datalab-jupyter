@@ -337,15 +337,20 @@ restart or rebuild the datalab API.
 
 HTTPS is required except for loopback URLs. For a trusted, temporary
 non-production deployment that must use another plain-HTTP address, set
-`DATALAB_JUPYTER_ALLOW_INSECURE_HTTP=true` in the API process. The companion
-file intentionally does not forward it; add an explicit local override:
+`PYDATALAB_TOOLS__ALLOW_INSECURE_HTTP=true` in the Datalab API process. The
+companion file intentionally does not forward it; add an explicit local
+override:
 
 ```yaml
 services:
   api:
     environment:
-      - DATALAB_JUPYTER_ALLOW_INSECURE_HTTP
+      - PYDATALAB_TOOLS__ALLOW_INSECURE_HTTP
 ```
 
-This setting only relaxes public-URL validation. It does not remove the launch
-exchange or shared client credentials and must never be used in production.
+This generic Datalab setting allows plain-HTTP launch URLs from every installed
+standalone tool. It does not remove authentication, authorization, the launch
+exchange, or shared client credentials, but HTTP can expose launch codes,
+tokens, and user data and must never be used in production. Existing local
+preview environment and override files using the former Jupyter-specific name
+must be updated when moving to these coordinated revisions.
