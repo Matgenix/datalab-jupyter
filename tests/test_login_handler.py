@@ -5,15 +5,17 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from tornado import web
 from tornado.httputil import HTTPHeaders, HTTPServerRequest, parse_body_arguments
 
 from datalab_jupyter.hub.authenticator import (
     DatalabAuthenticator,
+    DatalabCallbackHandler,
     DatalabLoginHandler,
     _credential_fingerprint,
+    _pkce_s256_challenge,
     _should_offer_renewal,
 )
 
@@ -110,8 +112,8 @@ class _Handler:
         stored_expires_at="2099-01-01T00:00:00+00:00",
     ):
         self.request = SimpleNamespace(
-            path="/hub/datalab-login",
-            uri="/hub/datalab-login",
+            path="/hub/datalab-callback",
+            uri="/hub/datalab-callback",
         )
         self.statsd = SimpleNamespace(incr=lambda _name: None)
         self.headers = {}
@@ -122,6 +124,8 @@ class _Handler:
         self.login_calls = 0
         self.candidate_seen = None
         self.renewal_seen = None
+        self.expected_user_seen = None
+        self.verifier_seen = None
         self.events = []
         self.stop_ready_after = stop_ready_after
         self.spawn_ready_after = spawn_ready_after
@@ -137,9 +141,20 @@ class _Handler:
         self.current_user = self.user
         self.authenticator = SimpleNamespace(
             api_url="http://datalab-api:5001",
+            browser_authorization_url=(
+                "https://api.example.test/v0.1/tools/jupyter/service-launch/authorize"
+            ),
             exchange_lock=asyncio.Lock(),
         )
-        self.settings = {"cookie_secret": b"test-cookie-secret"}
+        self.settings = {
+            "cookie_secret": b"test-cookie-secret",
+            "public_url": "https://hub.example.test/jupyter/",
+        }
+        self.hub = SimpleNamespace(base_url="/jupyter/hub/")
+        self.verifier_cookie = "A" * 43
+        self.cookies_set = []
+        self.cookies_cleared = []
+        self.secure_cookie_reads = []
         self.log = SimpleNamespace(warning=lambda *_args: None)
         self.user.auth_state["expires_at"] = stored_expires_at
         if ready and known_provenance:
@@ -150,7 +165,7 @@ class _Handler:
             self.spawner._stop_future.on_complete = lambda: self.user.spawners.pop("", None)
 
     def get_body_argument(self, name, default):
-        if name == "datalab_launch_code":
+        if name in {"datalab_launch_code", "datalab_authorization_code"}:
             return self.code
         return self.body_arguments.get(name, default)
 
@@ -160,11 +175,25 @@ class _Handler:
     def finish(self, value):
         self.finished = value
 
+    def _set_cookie(self, name, value, **kwargs):
+        self.cookies_set.append((name, value, kwargs))
+        self.verifier_cookie = value
+
+    def get_secure_cookie(self, name, **kwargs):
+        self.secure_cookie_reads.append((name, kwargs))
+        return self.verifier_cookie.encode() if self.verifier_cookie is not None else None
+
+    def clear_cookie(self, name, **kwargs):
+        self.cookies_cleared.append((name, kwargs))
+        self.verifier_cookie = None
+
     async def login_user(self):
         self.login_calls += 1
         self.events.append("login")
         self.candidate_seen = self._datalab_candidate_token
         self.renewal_seen = self._datalab_renew_existing_session
+        self.expected_user_seen = self._datalab_expected_user_id
+        self.verifier_seen = self._datalab_code_verifier
         if self.login_error is not None:
             raise self.login_error
         if not self.login_result:
@@ -185,6 +214,21 @@ class _Handler:
 
     async def _authenticate_and_redirect(self, code, **kwargs):
         await DatalabLoginHandler._authenticate_and_redirect(self, code, **kwargs)
+
+    async def _callback_post(self):
+        await DatalabLoginHandler._callback_post(self)
+
+    def _pkce_cookie_scope(self):
+        return DatalabLoginHandler._pkce_cookie_scope(self)
+
+    def _read_pkce_verifier(self):
+        return DatalabLoginHandler._read_pkce_verifier(self)
+
+    def _clear_pkce_verifier(self):
+        return DatalabLoginHandler._clear_pkce_verifier(self)
+
+    async def _existing_subject(self):
+        return await DatalabLoginHandler._existing_subject(self)
 
     async def _candidate_state(self):
         return await DatalabLoginHandler._candidate_state(self)
@@ -267,9 +311,9 @@ class _Handler:
             self.spawn_error,
         )
 
-    def redirect(self, url, permanent):
+    def redirect(self, url, permanent=False, status=None):
         self.events.append("redirect")
-        self.redirected_to = (url, permanent)
+        self.redirected_to = (url, permanent, status)
 
 
 class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
@@ -285,12 +329,219 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_get_renders_bootstrap_without_attempting_login(self):
         handler = _Handler()
+        handler.request.path = "/hub/datalab-login"
+        handler.request.uri = "/hub/datalab-login"
 
         await DatalabLoginHandler.get(handler)
 
         self.assertIn('name="datalab_launch_code"', handler.finished)
         self.assertEqual(handler.login_calls, 0)
         self.assertEqual(handler.headers["Cache-Control"], "no-store")
+
+    async def test_initial_post_sets_scoped_pkce_cookie_and_redirects_without_exchange(self):
+        handler = _Handler(code="A" * 43)
+        handler.request.path = "/jupyter/hub/datalab-login"
+        handler.request.uri = "/jupyter/hub/datalab-login"
+
+        with patch(
+            "datalab_jupyter.hub.authenticator.secrets.token_urlsafe",
+            return_value="dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+        ):
+            await DatalabLoginHandler.post(handler)
+
+        self.assertEqual(handler.login_calls, 0)
+        self.assertEqual(len(handler.cookies_set), 1)
+        name, verifier, options = handler.cookies_set[0]
+        self.assertEqual(name, "datalab-jupyter-pkce-verifier")
+        self.assertEqual(verifier, "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")
+        self.assertEqual(options["path"], "/jupyter/hub/datalab-callback")
+        self.assertIsNone(options["domain"])
+        self.assertIs(options["httponly"], True)
+        self.assertEqual(options["samesite"], "Lax")
+        self.assertIs(options["secure"], True)
+        redirect = urlsplit(handler.redirected_to[0])
+        self.assertEqual(
+            f"{redirect.scheme}://{redirect.netloc}{redirect.path}",
+            handler.authenticator.browser_authorization_url,
+        )
+        self.assertEqual(redirect.query, "")
+        fragment = dict(item.split("=", 1) for item in redirect.fragment.split("&"))
+        self.assertEqual(fragment["datalab_launch_code"], "A" * 43)
+        self.assertEqual(fragment["code_challenge_method"], "S256")
+        self.assertEqual(
+            fragment["code_challenge"],
+            _pkce_s256_challenge(verifier),
+        )
+        self.assertNotIn(verifier, handler.redirected_to[0])
+        self.assertEqual(handler.redirected_to[2], 303)
+
+    async def test_loopback_http_uses_non_secure_cookie_without_request_header_inference(self):
+        handler = _Handler(code="A" * 43)
+        handler.settings["public_url"] = "http://localhost:8000/prefix/jupyter/"
+        handler.hub.base_url = "/prefix/jupyter/hub/"
+        handler.request.host = "hostile.example"
+        handler.request.headers = {"X-Forwarded-Proto": "https"}
+
+        await DatalabLoginHandler.post(handler)
+
+        options = handler.cookies_set[0][2]
+        self.assertIs(options["secure"], False)
+        self.assertEqual(options["path"], "/prefix/jupyter/hub/datalab-callback")
+        self.assertTrue(
+            handler.redirected_to[0].startswith(handler.authenticator.browser_authorization_url)
+        )
+
+    async def test_pkce_cookie_overrides_hostile_global_options_and_host_headers(self):
+        handler = _Handler(code="A" * 43)
+        handler.settings["cookie_options"] = {
+            "domain": ".example.test",
+            "path": "/",
+            "httponly": False,
+            "samesite": "None",
+            "secure": False,
+        }
+        handler.request.host = "hostile.example"
+        handler.request.headers = {
+            "Host": "hostile.example",
+            "X-Forwarded-Host": "forwarded-hostile.example",
+            "X-Forwarded-Proto": "http",
+        }
+
+        await DatalabLoginHandler.post(handler)
+
+        options = handler.cookies_set[0][2]
+        self.assertIsNone(options["domain"])
+        self.assertEqual(options["path"], "/jupyter/hub/datalab-callback")
+        self.assertIs(options["httponly"], True)
+        self.assertEqual(options["samesite"], "Lax")
+        self.assertIs(options["secure"], True)
+        self.assertTrue(
+            handler.redirected_to[0].startswith(
+                "https://api.example.test/v0.1/tools/jupyter/service-launch/authorize#"
+            )
+        )
+        self.assertNotIn("hostile", handler.redirected_to[0])
+
+    async def test_latest_initial_launch_overwrites_the_single_verifier_cookie(self):
+        handler = _Handler(code="A" * 43)
+        with patch(
+            "datalab_jupyter.hub.authenticator.secrets.token_urlsafe",
+            side_effect=("A" * 43, "B" * 43),
+        ):
+            await DatalabLoginHandler.post(handler)
+            first_challenge = urlsplit(handler.redirected_to[0]).fragment
+            await DatalabLoginHandler.post(handler)
+            second_challenge = urlsplit(handler.redirected_to[0]).fragment
+
+        self.assertEqual(handler.verifier_cookie, "B" * 43)
+        self.assertNotEqual(first_challenge, second_challenge)
+        self.assertEqual(
+            {entry[0] for entry in handler.cookies_set},
+            {"datalab-jupyter-pkce-verifier"},
+        )
+
+    async def test_initial_post_rejects_unsafe_public_hub_url_before_setting_cookie(self):
+        handler = _Handler(code="A" * 43)
+        handler.settings["public_url"] = "http://hub.example.test/jupyter/"
+
+        with self.assertRaises(web.HTTPError) as raised:
+            await DatalabLoginHandler.post(handler)
+
+        self.assertEqual(raised.exception.status_code, 500)
+        self.assertEqual(handler.cookies_set, [])
+
+    async def test_callback_get_uses_authorization_code_fragment_bootstrap(self):
+        handler = _Handler()
+
+        await DatalabCallbackHandler.get(handler)
+
+        self.assertIn('name="datalab_authorization_code"', handler.finished)
+        self.assertNotIn('name="datalab_launch_code"', handler.finished)
+        self.assertEqual(handler.headers["Cache-Control"], "no-store")
+
+    async def test_callback_requires_matching_verifier_and_retains_it_on_invalid_code(self):
+        missing_cookie = _Handler()
+        missing_cookie.verifier_cookie = None
+        with self.assertRaises(web.HTTPError) as raised:
+            await DatalabCallbackHandler.post(missing_cookie)
+        self.assertEqual(raised.exception.status_code, 403)
+        self.assertEqual(missing_cookie.login_calls, 0)
+
+        invalid_code = _Handler(code="invalid code")
+        with self.assertRaises(web.HTTPError) as raised:
+            await DatalabCallbackHandler.post(invalid_code)
+        self.assertEqual(raised.exception.status_code, 403)
+        self.assertEqual(invalid_code.verifier_cookie, "A" * 43)
+        self.assertEqual(invalid_code.cookies_cleared, [])
+
+    async def test_callback_binds_existing_subject_even_when_candidate_expired_and_clears_cookie(
+        self,
+    ):
+        handler = _Handler(stored_expires_at="2000-01-01T00:00:00+00:00")
+
+        await DatalabCallbackHandler.post(handler)
+
+        self.assertIsNone(handler.candidate_seen)
+        self.assertEqual(handler.expected_user_seen, "user-id")
+        self.assertEqual(handler.verifier_seen, "A" * 43)
+        self.assertEqual(
+            handler.secure_cookie_reads,
+            [
+                (
+                    "datalab-jupyter-pkce-verifier",
+                    {"max_age_days": 5 * 60 / (24 * 60 * 60)},
+                )
+            ],
+        )
+        self.assertEqual(len(handler.cookies_cleared), 1)
+        name, options = handler.cookies_cleared[0]
+        self.assertEqual(name, "datalab-jupyter-pkce-verifier")
+        self.assertEqual(options["path"], "/jupyter/hub/datalab-callback")
+        self.assertIsNone(options["domain"])
+        self.assertEqual(options["samesite"], "Lax")
+        self.assertIs(options["secure"], True)
+        self.assertEqual(handler.redirected_to[2], 303)
+
+        with self.assertRaises(web.HTTPError) as raised:
+            await DatalabCallbackHandler.post(handler)
+        self.assertEqual(raised.exception.status_code, 403)
+        self.assertEqual(handler.login_calls, 1)
+
+    async def test_callback_fails_closed_for_malformed_existing_hub_identity(self):
+        handler = _Handler()
+        handler.user.auth_state["current_user"] = {}
+
+        with self.assertRaises(web.HTTPError) as raised:
+            await DatalabCallbackHandler.post(handler)
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(handler.login_calls, 0)
+        self.assertEqual(handler.cookies_cleared, [])
+
+    async def test_callback_rejects_inconsistent_existing_subject_without_lifecycle_changes(self):
+        handler = _Handler(ready=True)
+        original_state = dict(handler.user.auth_state)
+        original_spawner = handler.user.spawners[""]
+        handler.user.name = "datalab-different-user"
+
+        with self.assertRaises(web.HTTPError) as raised:
+            await DatalabCallbackHandler.post(handler)
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(handler.login_calls, 0)
+        self.assertEqual(handler.user.auth_state, original_state)
+        self.assertIs(handler.user.spawners[""], original_spawner)
+        self.assertNotIn("stop", handler.events)
+        self.assertNotIn("spawn", handler.events)
+
+    async def test_fresh_hub_browser_has_no_expected_subject(self):
+        handler = _Handler()
+        handler.current_user = None
+
+        await DatalabCallbackHandler.post(handler)
+
+        self.assertIsNone(handler.expected_user_seen)
+        self.assertIsNone(handler.candidate_seen)
 
     async def test_post_does_not_fall_back_to_a_query_code(self):
         handler = _Handler(code=None)
@@ -309,12 +560,12 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
         expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
         handler = _Handler(stored_expires_at=expires_at)
 
-        await DatalabLoginHandler.post(handler)
+        await DatalabCallbackHandler.post(handler)
 
         self.assertEqual(handler.login_calls, 0)
         self.assertIn("Extend Datalab access and open JupyterLab", handler.finished)
         self.assertIn("Continue without extending", handler.finished)
-        self.assertIn('name="datalab_launch_code" value="secret"', handler.finished)
+        self.assertIn('name="datalab_authorization_code" value="secret"', handler.finished)
         self.assertNotIn("stale-token", handler.finished)
         self.assertEqual(handler.headers["Cache-Control"], "no-store")
         self.assertEqual(handler.headers["Referrer-Policy"], "no-referrer")
@@ -332,7 +583,7 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
                     "renewal_binding": binding,
                 }
 
-                await DatalabLoginHandler.post(handler)
+                await DatalabCallbackHandler.post(handler)
 
                 self.assertEqual(handler.login_calls, 1)
                 self.assertEqual(handler.events[0], "login")
@@ -354,7 +605,7 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
         }
 
         with self.assertRaises(web.HTTPError) as raised:
-            await DatalabLoginHandler.post(handler)
+            await DatalabCallbackHandler.post(handler)
 
         self.assertEqual(raised.exception.status_code, 409)
         self.assertEqual(handler.login_calls, 0)
@@ -384,7 +635,7 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
                 }
 
                 with self.assertRaises(web.HTTPError) as raised:
-                    await DatalabLoginHandler.post(handler)
+                    await DatalabCallbackHandler.post(handler)
 
                 self.assertEqual(raised.exception.status_code, 409)
                 self.assertEqual(handler.login_calls, 0)
@@ -401,7 +652,7 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
         }
 
         with self.assertRaises(web.HTTPError) as raised:
-            await DatalabLoginHandler.post(handler)
+            await DatalabCallbackHandler.post(handler)
         self.assertEqual(raised.exception.status_code, 409)
         self.assertEqual(handler.login_calls, 0)
 
@@ -411,7 +662,7 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
             "renewal_binding": "not-a-binding",
         }
         with self.assertRaises(web.HTTPError) as raised:
-            await DatalabLoginHandler.post(handler)
+            await DatalabCallbackHandler.post(handler)
         self.assertEqual(raised.exception.status_code, 400)
         self.assertEqual(handler.login_calls, 0)
 
@@ -429,7 +680,7 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
             patch("tornado.web.time.time", return_value=time.time() + 301),
             self.assertRaises(web.HTTPError) as raised,
         ):
-            await DatalabLoginHandler.post(handler)
+            await DatalabCallbackHandler.post(handler)
 
         self.assertEqual(raised.exception.status_code, 409)
         self.assertEqual(handler.login_calls, 0)
@@ -438,7 +689,7 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
         handler = _Handler(ready=True)
         old_spawner = handler.spawner
 
-        await DatalabLoginHandler.post(handler)
+        await DatalabCallbackHandler.post(handler)
 
         self.assertEqual(
             handler.events,
@@ -451,10 +702,11 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
             (
                 "/user/test/datalab/open-selected#notebook_launch_code=selected-items-code",
                 False,
+                303,
             ),
         )
         self.assertNotIn("?notebook_launch_code=", handler.redirected_to[0])
-        self.assertFalse(hasattr(handler, "_datalab_launch_code"))
+        self.assertFalse(hasattr(handler, "_datalab_authorization_code"))
         self.assertNotIn("notebook_launch_code", handler.user.auth_state)
 
     async def test_ready_server_with_matching_reused_credentials_is_retained(self):
@@ -465,7 +717,7 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
         original_spawner = handler.spawner
 
-        await DatalabLoginHandler.post(handler)
+        await DatalabCallbackHandler.post(handler)
 
         self.assertEqual(handler.events, ["login", "redirect"])
         self.assertIs(handler.user.spawners[""], original_spawner)
@@ -473,14 +725,14 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_fresh_selected_items_launch_spawns_without_a_stop(self):
         handler = _Handler()
 
-        await DatalabLoginHandler.post(handler)
+        await DatalabCallbackHandler.post(handler)
 
         self.assertEqual(handler.events, ["login", "spawn", "spawn-complete", "redirect"])
 
     async def test_fresh_normal_launch_starts_server_and_redirects_to_workspace(self):
         handler = _Handler(selected_items=False)
 
-        await DatalabLoginHandler.post(handler)
+        await DatalabCallbackHandler.post(handler)
 
         self.assertEqual(handler.events, ["login", "spawn", "spawn-complete", "redirect"])
         self.assertRegex(
@@ -492,7 +744,7 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_pending_spawn_is_awaited_then_replaced(self):
         handler = _Handler(pending="spawn")
 
-        await DatalabLoginHandler.post(handler)
+        await DatalabCallbackHandler.post(handler)
 
         self.assertEqual(
             handler.events,
@@ -510,7 +762,7 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_pending_stop_is_awaited_before_the_replacement_spawn(self):
         handler = _Handler(pending="stop")
 
-        await DatalabLoginHandler.post(handler)
+        await DatalabCallbackHandler.post(handler)
 
         self.assertEqual(
             handler.events,
@@ -525,7 +777,7 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with self.assertRaises(web.HTTPError) as raised:
-            await DatalabLoginHandler.post(handler)
+            await DatalabCallbackHandler.post(handler)
 
         self.assertEqual(raised.exception.status_code, 503)
         self.assertNotIn("spawn", handler.events)
@@ -534,7 +786,7 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_pending_stop_for_an_ordinary_launch_spawns_before_workspace_redirect(self):
         handler = _Handler(pending="stop", selected_items=False)
 
-        await DatalabLoginHandler.post(handler)
+        await DatalabCallbackHandler.post(handler)
 
         self.assertEqual(
             handler.events,
@@ -550,7 +802,7 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
             known_provenance=False,
         )
 
-        await DatalabLoginHandler.post(handler)
+        await DatalabCallbackHandler.post(handler)
 
         self.assertEqual(handler.events.count("stop"), 1)
         self.assertEqual(handler.events.count("spawn"), 1)
@@ -570,7 +822,7 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
         handler = _Handler(ready=True, login_result=False)
 
         with self.assertRaises(web.HTTPError) as raised:
-            await DatalabLoginHandler.post(handler)
+            await DatalabCallbackHandler.post(handler)
 
         self.assertEqual(raised.exception.status_code, 403)
         self.assertNotIn("stop", handler.events)
@@ -580,10 +832,10 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
         handler = _Handler(login_error=asyncio.CancelledError())
 
         with self.assertRaises(asyncio.CancelledError):
-            await DatalabLoginHandler.post(handler)
+            await DatalabCallbackHandler.post(handler)
 
         self.assertFalse(handler.authenticator.exchange_lock.locked())
-        self.assertFalse(hasattr(handler, "_datalab_launch_code"))
+        self.assertFalse(hasattr(handler, "_datalab_authorization_code"))
 
     async def test_superseded_credentials_fail_after_pending_spawn(self):
         handler = _Handler(pending="spawn")
@@ -592,7 +844,7 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with self.assertRaises(web.HTTPError) as raised:
-            await DatalabLoginHandler.post(handler)
+            await DatalabCallbackHandler.post(handler)
 
         self.assertEqual(raised.exception.status_code, 409)
         self.assertNotIn("stop", handler.events)
@@ -616,7 +868,9 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
         second.spawner = first.spawner
         second.authenticator = first.authenticator
 
-        await asyncio.gather(DatalabLoginHandler.post(first), DatalabLoginHandler.post(second))
+        await asyncio.gather(
+            DatalabCallbackHandler.post(first), DatalabCallbackHandler.post(second)
+        )
 
         self.assertNotIn("stop", first.events)
         self.assertNotIn("stop", second.events)
@@ -636,7 +890,7 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
         handler.spawn_single_user = spawn_without_provenance
 
         with self.assertRaises(web.HTTPError) as raised:
-            await DatalabLoginHandler.post(handler)
+            await DatalabCallbackHandler.post(handler)
 
         self.assertEqual(raised.exception.status_code, 503)
         self.assertIsNone(handler.redirected_to)
@@ -685,7 +939,7 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
         handler = _Handler(ready=True, stop_ready_after=True)
 
         with self.assertRaises(web.HTTPError) as raised:
-            await DatalabLoginHandler.post(handler)
+            await DatalabCallbackHandler.post(handler)
 
         self.assertEqual(raised.exception.status_code, 503)
         self.assertIsNone(handler.redirected_to)
@@ -700,13 +954,13 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
                 handler = _Handler(ready=True, **options)
 
                 with self.assertRaises(web.HTTPError) as raised:
-                    await DatalabLoginHandler.post(handler)
+                    await DatalabCallbackHandler.post(handler)
 
                 self.assertEqual(raised.exception.status_code, 503)
                 self.assertIsNone(handler.redirected_to)
 
 
-class _PreparedLoginHandler(DatalabLoginHandler):
+class _PreparedLoginHandler(DatalabCallbackHandler):
     """Exercise JupyterHub's real prepare-before-post handler lifecycle."""
 
     async def get_current_user(self):
@@ -733,6 +987,12 @@ class _PreparedLoginHandler(DatalabLoginHandler):
             notebook_launch_code=None,
         )
         return target_user
+
+    def _read_pkce_verifier(self):
+        return "A" * 43
+
+    def _clear_pkce_verifier(self):
+        self.settings["pkce_cookie_cleared"] = True
 
     async def spawn_single_user(self, user):
         spawner = _Spawner()
@@ -764,10 +1024,10 @@ class PreparedHandlerIntegrationTests(unittest.IsolatedAsyncioTestCase):
             cookie_secret=b"test-cookie-secret",
         )
         headers = HTTPHeaders({"Content-Type": "application/x-www-form-urlencoded"})
-        body = b"datalab_launch_code=launch-code"
+        body = b"datalab_authorization_code=authorization-code"
         request = HTTPServerRequest(
             method="POST",
-            uri="/hub/datalab-login",
+            uri="/hub/datalab-callback",
             headers=headers,
             body=body,
             connection=SimpleNamespace(set_close_callback=lambda _callback: None),
@@ -807,15 +1067,15 @@ class PreparedHandlerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         fake_handler = _Handler(stored_expires_at=existing_user.auth_state["expires_at"])
         candidate = await fake_handler._candidate_state()
-        binding = fake_handler._create_confirmation_binding("launch-code", candidate)
+        binding = fake_handler._create_confirmation_binding("authorization-code", candidate)
         confirmation = {
-            "datalab_launch_code": "launch-code",
+            "datalab_authorization_code": "authorization-code",
             "renewal_binding": binding,
             "renew_existing_session": "true",
         }
         bootstrap_request = HTTPServerRequest(
             method="GET",
-            uri="/hub/datalab-login",
+            uri="/hub/datalab-callback",
             connection=SimpleNamespace(set_close_callback=lambda _callback: None),
         )
         bootstrap_handler = _PreparedLoginHandler(application, bootstrap_request)
@@ -832,7 +1092,7 @@ class PreparedHandlerIntegrationTests(unittest.IsolatedAsyncioTestCase):
             body = urlencode(form).encode()
             request = HTTPServerRequest(
                 method="POST",
-                uri="/hub/datalab-login",
+                uri="/hub/datalab-callback",
                 headers=headers,
                 body=body,
                 connection=SimpleNamespace(set_close_callback=lambda _callback: None),

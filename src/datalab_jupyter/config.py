@@ -11,11 +11,20 @@ def _environment(name: str) -> str | None:
     return value or None
 
 
-def _http_base_url(name: str, *, allow_insecure: bool = False) -> str | None:
-    value = _environment(name)
-    if value is None:
-        return None
+def validate_http_base_url(
+    value: str,
+    *,
+    name: str,
+    allow_insecure: bool = False,
+) -> str:
+    """Validate and normalize one absolute HTTP(S) base URL."""
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError(f"{name} must be an absolute HTTP(S) base URL")
     parsed = urlsplit(value)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an absolute HTTP(S) base URL") from exc
     if (
         parsed.scheme not in {"http", "https"}
         or parsed.hostname is None
@@ -23,6 +32,8 @@ def _http_base_url(name: str, *, allow_insecure: bool = False) -> str | None:
         or parsed.password is not None
         or parsed.query
         or parsed.fragment
+        or port is not None
+        and not 1 <= port <= 65535
     ):
         raise ValueError(f"{name} must be an absolute HTTP(S) base URL")
     hostname = parsed.hostname.rstrip(".").lower()
@@ -33,6 +44,13 @@ def _http_base_url(name: str, *, allow_insecure: bool = False) -> str | None:
     if parsed.scheme != "https" and not is_loopback and not allow_insecure:
         raise ValueError(f"{name} must use HTTPS unless it targets a loopback host")
     return value.rstrip("/")
+
+
+def _http_base_url(name: str, *, allow_insecure: bool = False) -> str | None:
+    value = _environment(name)
+    if value is None:
+        return None
+    return validate_http_base_url(value, name=name, allow_insecure=allow_insecure)
 
 
 @dataclass(frozen=True)

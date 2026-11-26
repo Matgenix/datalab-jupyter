@@ -6,6 +6,7 @@ import pytest
 CONFIG_PATH = Path(__file__).parents[1] / "jupyterhub_config.py"
 REQUIRED_ENVIRONMENT = {
     "DATALAB_JUPYTER_API_URL": "http://datalab-api:5001",
+    "DATALAB_JUPYTER_BROWSER_API_URL": "https://api.example.test",
     "DATALAB_JUPYTER_CLIENT_ID": "datalab-jupyter",
     "DATALAB_JUPYTER_CLIENT_SECRET": "a-secure-test-client-secret",
     "DATALAB_JUPYTER_DOCKER_NETWORK": "datalab_tools",
@@ -64,3 +65,26 @@ def test_managed_config_retains_existing_resource_and_isolation_settings(monkeyp
         "--timeout=3600",
         "--max-age=86400",
     ]
+
+
+def test_managed_config_wires_trusted_browser_and_hub_urls(monkeypatch):
+    monkeypatch.setenv("DATALAB_JUPYTER_PUBLIC_URL", "https://hub.example.test/prefix/jupyter")
+    config = load_managed_config(monkeypatch)
+
+    assert config.DatalabAuthenticator.browser_api_url == "https://api.example.test"
+    assert config.JupyterHub.public_url == "https://hub.example.test/prefix/jupyter/"
+    assert config.JupyterHub.bind_url == "http://0.0.0.0:8000/prefix/jupyter/"
+
+
+def test_managed_config_requires_browser_api_url_and_rejects_unsafe_public_urls(monkeypatch):
+    for name, value in REQUIRED_ENVIRONMENT.items():
+        if name != "DATALAB_JUPYTER_BROWSER_API_URL":
+            monkeypatch.setenv(name, value)
+    monkeypatch.delenv("DATALAB_JUPYTER_BROWSER_API_URL", raising=False)
+    with pytest.raises(RuntimeError, match="DATALAB_JUPYTER_BROWSER_API_URL"):
+        runpy.run_path(str(CONFIG_PATH))
+
+    monkeypatch.setenv("DATALAB_JUPYTER_BROWSER_API_URL", "https://api.example.test")
+    monkeypatch.setenv("DATALAB_JUPYTER_PUBLIC_URL", "http://hub.example.test/jupyter")
+    with pytest.raises(ValueError, match="must use HTTPS"):
+        runpy.run_path(str(CONFIG_PATH))

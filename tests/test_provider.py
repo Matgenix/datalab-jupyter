@@ -51,7 +51,7 @@ class ProviderTests(TestCase):
             browser_url=lambda _app_url: "https://jupyter.example.test/jupyter",
         )
         grants = create_autospec(ToolLaunchGrantIssuer, instance=True)
-        grants.issue.return_value = "launch-code"
+        grants.issue_service_launch.return_value = "launch-code"
 
         with (
             patch.object(provider_module.CONFIG.TOOLS, "ALLOW_INSECURE_HTTP", True),
@@ -63,8 +63,9 @@ class ProviderTests(TestCase):
         settings_loader.assert_called_once_with(allow_insecure_http=True)
         provider.launch(SimpleNamespace(), grants)
 
-        grants.issue.assert_called_once_with(
+        grants.issue_service_launch.assert_called_once_with(
             "jupyter-client",
+            "https://jupyter.example.test/jupyter/hub/datalab-callback",
             lifetime_seconds=5 * 60,
             session_policy=ToolSessionPolicy.REUSE_OR_REPLACE,
             allow_session_renewal=True,
@@ -98,7 +99,7 @@ class ProviderTests(TestCase):
             ) as settings_loader,
             patch.object(
                 provider_module,
-                "exchange_service_launch_code",
+                "exchange_authorized_service_launch_code",
                 autospec=True,
                 return_value=exchange,
             ) as exchange_mock,
@@ -114,13 +115,23 @@ class ProviderTests(TestCase):
                 return None
 
             client = app.test_client()
-            response = client.post("/tool/exchange", json={"code": "launch-code"})
+            response = client.post(
+                "/tool/exchange",
+                json={
+                    "authorization_code": "authorization-code",
+                    "code_verifier": "A" * 43,
+                },
+            )
             self.assertEqual(response.status_code, 401)
 
             invalid_credentials = b64encode(b"jupyter-client:wrong-secret").decode()
             response = client.post(
                 "/tool/exchange",
-                json={"code": "launch-code", "renew_existing_session": True},
+                json={
+                    "authorization_code": "authorization-code",
+                    "code_verifier": "A" * 43,
+                    "renew_existing_session": True,
+                },
                 headers={"Authorization": f"Basic {invalid_credentials}"},
             )
             self.assertEqual(response.status_code, 401)
@@ -131,7 +142,12 @@ class ProviderTests(TestCase):
             ).decode()
             response = client.post(
                 "/tool/exchange",
-                json={"code": "launch-code", "renew_existing_session": True},
+                json={
+                    "authorization_code": "authorization-code",
+                    "code_verifier": "A" * 43,
+                    "expected_user_id": "0123456789abcdef01234567",
+                    "renew_existing_session": True,
+                },
                 headers={
                     "Authorization": f"Basic {valid_credentials}",
                     "DATALAB-EXISTING-TOOL-TOKEN": "existing-token",
@@ -140,10 +156,12 @@ class ProviderTests(TestCase):
 
             self.assertEqual(response.status_code, 200)
             exchange_mock.assert_called_once_with(
-                "launch-code",
+                "authorization-code",
+                "A" * 43,
                 JupyterToolProvider.id,
                 settings.client_id,
                 tool_session_lifetime_seconds=24 * 60 * 60,
+                expected_user_id="0123456789abcdef01234567",
                 candidate_tool_access_token="existing-token",  # noqa: S106
                 minimum_reuse_lifetime_seconds=10 * 60,
                 renew_existing_session=True,
@@ -171,7 +189,7 @@ class ProviderTests(TestCase):
         with (
             patch.object(provider_module, "load_plugin_settings", return_value=settings),
             patch.object(
-                provider_module, "exchange_service_launch_code", autospec=True
+                provider_module, "exchange_authorized_service_launch_code", autospec=True
             ) as exchange_mock,
         ):
             provider = JupyterToolProvider()
@@ -190,8 +208,28 @@ class ProviderTests(TestCase):
                 [],
                 {},
                 {"code": "value", "token": "body-token"},
-                {"code": "value", "renew_existing_session": 1},
-                {"code": "value", "renew_existing_session": "true"},
+                {"authorization_code": "value"},
+                {"authorization_code": "value", "code_verifier": "short"},
+                {
+                    "authorization_code": "value",
+                    "code_verifier": "A" * 43,
+                    "expected_user_id": "",
+                },
+                {
+                    "authorization_code": "value",
+                    "code_verifier": "A" * 43,
+                    "expected_user_id": None,
+                },
+                {
+                    "authorization_code": "value",
+                    "code_verifier": "A" * 43,
+                    "renew_existing_session": 1,
+                },
+                {
+                    "authorization_code": "value",
+                    "code_verifier": "A" * 43,
+                    "renew_existing_session": "true",
+                },
             ):
                 with self.subTest(payload=payload):
                     response = client.post(

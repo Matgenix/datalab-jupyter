@@ -1,6 +1,7 @@
 """datalab tool provider and JupyterHub launch-code exchange."""
 
 import hmac
+import re
 from importlib.metadata import PackageNotFoundError, version
 from urllib.parse import urlencode
 
@@ -14,14 +15,21 @@ from pydatalab.tools import (
     ToolProvider,
     ToolRouteAuth,
     ToolSessionPolicy,
-    exchange_service_launch_code,
+    exchange_authorized_service_launch_code,
     issue_tool_selection_code,
 )
 
-from datalab_jupyter.config import PluginSettings, load_plugin_settings
+from datalab_jupyter.config import (
+    PluginSettings,
+    load_plugin_settings,
+    validate_http_base_url,
+)
 
 JUPYTER_BLUEPRINT = Blueprint("jupyter-tool", __name__)
 _MAX_CANDIDATE_TOKEN_LENGTH = 4096
+_HANDOFF_CODE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$", re.ASCII)
+_PKCE_VERIFIER_PATTERN = re.compile(r"^[A-Za-z0-9._~-]{43,128}$", re.ASCII)
+_USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$", re.ASCII)
 
 
 def _distribution_version() -> str:
@@ -35,6 +43,14 @@ def _login_url(code: str, settings: PluginSettings) -> str:
     base_url = settings.browser_url(CONFIG.APP_URL)
     login_url = f"{base_url.rstrip('/')}/hub/datalab-login"
     return f"{login_url}#{urlencode({'datalab_launch_code': code})}"
+
+
+def _callback_url(settings: PluginSettings) -> str:
+    base_url = validate_http_base_url(
+        settings.browser_url(CONFIG.APP_URL),
+        name="Datalab Jupyter public URL",
+    )
+    return f"{base_url}/hub/datalab-callback"
 
 
 class JupyterToolProvider(ToolProvider):
@@ -75,8 +91,9 @@ class JupyterToolProvider(ToolProvider):
         )
 
     def launch(self, context: ToolContext, grants: ToolLaunchGrantIssuer) -> str:
-        code = grants.issue(
+        code = grants.issue_service_launch(
             self.settings.client_id,
+            _callback_url(self.settings),
             lifetime_seconds=5 * 60,
             session_policy=ToolSessionPolicy.REUSE_OR_REPLACE,
             allow_session_renewal=True,
@@ -94,38 +111,56 @@ def disable_exchange_caching(response):
 
 @JUPYTER_BLUEPRINT.route("/exchange", methods=["POST"])
 def exchange_jupyter_launch_code():
-    """Exchange one launch code for a delegated datalab tool session."""
+    """Exchange one browser-authorized code for a delegated datalab tool session."""
 
     payload = request.get_json(silent=True)
-    allowed_fields = {"code", "renew_existing_session"}
+    allowed_fields = {
+        "authorization_code",
+        "code_verifier",
+        "expected_user_id",
+        "renew_existing_session",
+    }
     if (
         not isinstance(payload, dict)
-        or "code" not in payload
+        or not {"authorization_code", "code_verifier"}.issubset(payload)
         or not set(payload).issubset(allowed_fields)
     ):
         return jsonify({"status": "error", "message": "Invalid exchange request"}), 400
-    code = payload.get("code")
+    authorization_code = payload.get("authorization_code")
+    code_verifier = payload.get("code_verifier")
+    expected_user_id = payload.get("expected_user_id")
     renew_existing_session = payload.get("renew_existing_session", False)
-    if not isinstance(code, str) or not code:
-        return jsonify({"status": "error", "message": "A launch code is required"}), 400
-    if type(renew_existing_session) is not bool:
-        return jsonify({"status": "error", "message": "Invalid renewal request"}), 400
+    if (
+        not isinstance(authorization_code, str)
+        or not _HANDOFF_CODE_PATTERN.fullmatch(authorization_code)
+        or not isinstance(code_verifier, str)
+        or not _PKCE_VERIFIER_PATTERN.fullmatch(code_verifier)
+        or "expected_user_id" in payload
+        and (
+            not isinstance(expected_user_id, str)
+            or not _USER_ID_PATTERN.fullmatch(expected_user_id)
+        )
+        or type(renew_existing_session) is not bool
+    ):
+        return jsonify({"status": "error", "message": "Invalid exchange request"}), 400
 
     settings = load_plugin_settings(allow_insecure_http=CONFIG.TOOLS.ALLOW_INSECURE_HTTP)
     candidate = request.headers.get("DATALAB-EXISTING-TOOL-TOKEN")
     if candidate is not None and len(candidate) > _MAX_CANDIDATE_TOKEN_LENGTH:
         candidate = None
-    exchange = exchange_service_launch_code(
-        code,
+    exchange = exchange_authorized_service_launch_code(
+        authorization_code,
+        code_verifier,
         JupyterToolProvider.id,
         settings.client_id,
         tool_session_lifetime_seconds=24 * 60 * 60,
+        expected_user_id=expected_user_id,
         candidate_tool_access_token=candidate,
         minimum_reuse_lifetime_seconds=10 * 60,
         renew_existing_session=renew_existing_session,
     )
     if exchange is None:
-        return jsonify({"status": "error", "message": "Invalid or expired launch code"}), 400
+        return jsonify({"status": "error", "message": "Invalid or expired authorization"}), 400
 
     response_payload = {
         "user_id": exchange.context.user_id,

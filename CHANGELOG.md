@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Replace the directly exchangeable browser launch URL with a two-code,
+  browser-authorized handoff bound to an RFC 7636 `S256` verifier cookie, the
+  confidential provider client, and any existing immutable Hub subject. Require
+  `DATALAB_JUPYTER_BROWSER_API_URL`, an explicit trusted Hub public URL, and a
+  coordinated core/provider/Hub rollout with no raw-code compatibility path.
 - Offer an explicit, five-minute-bound confirmation when a stored datalab
   credential has one hour or less remaining. Successful renewal advances its
   authoritative expiry without changing the token or restarting a compatible

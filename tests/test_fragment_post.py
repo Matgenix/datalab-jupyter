@@ -34,6 +34,7 @@ class FragmentPostTests(TestCase):
         self.assertNotIn("test-launch-credential", page)
         self.assertEqual(handler.headers["Cache-Control"], "no-store")
         self.assertEqual(handler.headers["Referrer-Policy"], "no-referrer")
+        self.assertEqual(handler.headers["X-Content-Type-Options"], "nosniff")
 
         nonce_match = re.search(r'<script nonce="([^"]+)">', page)
         self.assertIsNotNone(nonce_match)
@@ -61,6 +62,8 @@ class FragmentPostTests(TestCase):
         self.assertIn('name="_xsrf" value="test-xsrf-token"', page)
         self.assertIn('value="launch&quot;&gt;&lt;secret"', page)
         self.assertIn('value="signed&quot;&gt;&lt;binding"', page)
+        self.assertIn('name="datalab_authorization_code"', page)
+        self.assertNotIn('name="datalab_launch_code"', page)
         self.assertIn('name="renew_existing_session" value="false"', page)
         self.assertIn('name="renew_existing_session" value="true"', page)
         self.assertNotIn("<secret", page)

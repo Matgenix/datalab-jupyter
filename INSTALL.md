@@ -54,6 +54,7 @@ least 32 characters; generate and store it with the deployment's secret manager.
 export DATALAB_JUPYTER_CLIENT_ID='datalab-jupyter'
 export DATALAB_JUPYTER_CLIENT_SECRET='<secret-with-at-least-32-characters>'
 export PYDATALAB_APP_URL='https://datalab.example.org'
+export DATALAB_JUPYTER_BROWSER_API_URL='https://api.datalab.example.org'
 ```
 
 `PYDATALAB_APP_URL` is the canonical browser-facing datalab URL. With no URL
@@ -64,6 +65,15 @@ URL.
 The Hub reaches the API at `http://datalab-api:5001` by default. If datalab has
 a non-root `PYDATALAB_ROOT_PATH`, include it in `DATALAB_JUPYTER_API_URL`; for
 example, use `http://datalab-api:5001/api` for `/api`.
+
+`DATALAB_JUPYTER_BROWSER_API_URL` is required and is the externally reachable
+API base before `/v0.1`. Include a non-root API prefix, for example
+`https://datalab.example.org/api`. It is distinct from the internal
+`DATALAB_JUPYTER_API_URL`, the frontend `PYDATALAB_APP_URL`, and the Hub
+`DATALAB_JUPYTER_PUBLIC_URL`. It is never inferred from request Host or
+forwarded headers. The browser API and Hub public URLs require HTTPS outside
+explicit loopback development; the broad datalab insecure-HTTP testing option
+does not relax this handoff.
 
 ### 4. Start the deployment
 
@@ -92,12 +102,21 @@ Proxy the public `/jupyter/` path to it, or set
 - preserve the path prefix and forwarded host and protocol;
 - support WebSocket upgrades and long-lived kernel connections;
 - terminate TLS; and
-- disable request-body logging.
+- disable request-body, cookie, and authorization-header logging.
+
+The existing public API prefix must cover
+`/v0.1/tools/jupyter/service-launch/authorize`, and the Hub prefix must cover
+both `/hub/datalab-login` and `/hub/datalab-callback`; no new proxy rule is
+needed when those prefixes are already proxied. Serve each fragment-clearing
+page directly, without an intermediate canonical-host or path redirect. If a
+redirect is unavoidable, review its target as part of the same trusted
+credential boundary. Browsers can preserve URL fragments across redirects.
 
 Launch credentials are removed from URL fragments and submitted in same-origin
-POST bodies. Verify through the real proxy that access logs contain only the
-credential-free `/hub/datalab-login` and
-`/user/<name>/datalab/open-selected` paths and no request bodies.
+POST bodies. Do not log request bodies or redirect `Location` values containing
+fragments. Verify through the real proxy that access logs contain only
+credential-free request paths and never service launch request codes, service
+authorization codes, PKCE verifiers, delegated tokens, or user data.
 
 ### 6. Verify as a normal user
 
@@ -113,6 +132,19 @@ and maximum-age culling still apply, and that the Hub and user containers cannot
 reach MongoDB or read datalab server secrets.
 If the confirmation expires or reports changed access, launch JupyterLab again
 from datalab and repeat the check.
+
+Use two disposable datalab users and two independent browser cookie jars for the
+security check. Confirm that A's copied initial URL fails in B's datalab
+session, A's authorized callback fails in B's Hub cookie context, and both fail
+when B has no prior Hub login. B's Hub cookie, authentication state, running
+server, and persistent volume must remain B's. Then verify A's normal launch,
+matching relaunch, both renewal choices, selected-item handoff, and replay
+rejection. Do not inspect or write real user data for this test.
+
+One browser cookie context has one outstanding launch: a second initial launch
+overwrites the first verifier cookie, so the older callback fails closed. To
+switch datalab identities in one browser, sign out of JupyterHub before
+launching from the other account; the Hub never switches accounts automatically.
 
 ## Routine operations
 
@@ -131,19 +163,26 @@ both simultaneously.
 
 ### Upgrade and rollback
 
-Deploy datalab's `REUSE_OR_REPLACE` policy and explicit-renewal core support
-before this release. Then upgrade the provider package, Hub image, and user-server
-integration atomically. The browser handoff has no query-string compatibility
-path. An older Hub sends no candidate and therefore continues to replace safely;
-a provider response without result flags is also treated as a replacement.
+This browser protocol requires an atomic upgrade of datalab core, the installed
+provider, and the Hub image. First configure
+`DATALAB_JUPYTER_BROWSER_API_URL`, render and review the deployment, then disable
+Jupyter launches or place the Hub behind maintenance access. Deploy compatible
+core and provider revisions together, verify the provider loaded and that its
+`/exchange` rejects the old raw-code contract, then deploy the matching Hub in
+the same maintenance window. Allow old five-minute grants to expire and run the
+two-user check before restoring access.
 
-For an upgrade, review a new source revision, publish and pin its image digest,
-pin the matching provider release in `plugins.toml`, rebuild datalab, and recreate
-the combined deployment. Verify the launch and relaunch tests above. For
-rollback, restore both previous pins and recreate all components together.
-Roll back the Jupyter components before rolling back datalab core, and allow
-outstanding five-minute launch grants to expire. Rollback does not shorten a
-credential whose expiry was already renewed; revoke it explicitly if needed.
+Mixed new/old pairs fail closed and have no compatibility fallback: an old Hub
+cannot exchange a new pending request, a new Hub cannot authorize against old
+core, and a new Hub cannot authorize the legacy purpose issued by an old
+provider. However, a new core with both the old provider and old Hub still
+exposes the retained legacy non-browser service exchange. Provider revision
+verification and temporary launch unavailability are therefore security
+requirements.
+
+For rollback, disable access first, restore all three previous revisions, and
+recreate the components together. Never roll back only the Hub or provider.
+Allow outstanding five-minute grants to expire before reopening access.
 
 ### Removal
 
@@ -279,7 +318,9 @@ Then configure the Hub:
 from datalab_jupyter.hub import DatalabAuthenticator
 
 c.JupyterHub.authenticator_class = DatalabAuthenticator
+c.JupyterHub.public_url = "https://jupyter.example.org/"
 c.DatalabAuthenticator.api_url = "https://api.example.org"
+c.DatalabAuthenticator.browser_api_url = "https://api.example.org"
 c.DatalabAuthenticator.client_id = "datalab-jupyter"
 c.DatalabAuthenticator.client_secret = "<the-same-deployment-secret>"
 c.DatalabAuthenticator.enable_auth_state = True
@@ -292,6 +333,11 @@ Set a persistent `JUPYTERHUB_CRYPT_KEY`, use
 lifetimes within the delegated datalab session lifetime. Configure the provider
 with `DATALAB_JUPYTER_EXTERNAL_URL=<public-https-hub-url>` and run datalab
 without the companion Compose file.
+
+`JupyterHub.public_url` and `DatalabAuthenticator.browser_api_url` are mandatory
+security inputs for an external Hub as well. Set the browser API URL to the
+public base before `/v0.1`, including any API prefix. It must not be the internal
+container address or be inferred from request headers.
 
 The external deployment must preserve the `DATALAB_API_KEY`, `DATALAB_API_URL`,
 and `DATALAB_CURRENT_USER_JSON` values written by the authenticator's pre-spawn

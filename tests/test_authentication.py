@@ -105,9 +105,46 @@ class AuthenticatorTests(IsolatedAsyncioTestCase):
     def setUp(self):
         self.authenticator = DatalabAuthenticator(
             api_url="http://datalab-api:5001/",
+            browser_api_url="https://api.example.test/prefix/",
             client_id="jupyter-client",
             client_secret="integration-secret",  # noqa: S106
         )
+
+    def test_browser_api_url_is_required_strict_and_constructs_one_fixed_route(self):
+        with self.assertRaisesRegex(ValueError, "BROWSER_API_URL"):
+            DatalabAuthenticator(
+                api_url="http://datalab-api:5001",
+                client_id="jupyter-client",
+                client_secret="integration-secret",  # noqa: S106
+            )
+        for value in (
+            "http://api.example.test",
+            "https://user:secret@api.example.test",
+            "https://api.example.test?target=other",
+        ):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                DatalabAuthenticator(
+                    api_url="http://datalab-api:5001",
+                    browser_api_url=value,
+                    client_id="jupyter-client",
+                    client_secret="integration-secret",  # noqa: S106
+                )
+        self.assertEqual(
+            self.authenticator.browser_authorization_url,
+            "https://api.example.test/prefix/v0.1/tools/jupyter/service-launch/authorize",
+        )
+        handlers = self.authenticator.get_handlers(
+            SimpleNamespace(public_url="https://hub.example.test/jupyter/")
+        )
+        self.assertEqual(
+            [path for path, _handler in handlers],
+            [
+                "/datalab-login",
+                "/datalab-callback",
+            ],
+        )
+        with self.assertRaises(ValueError):
+            self.authenticator.get_handlers(SimpleNamespace(public_url=""))
 
     async def test_authenticate_sends_candidate_and_keeps_selection_request_local(self):
         payload = valid_payload()
@@ -118,7 +155,9 @@ class AuthenticatorTests(IsolatedAsyncioTestCase):
         )
         requests = []
         handler = SimpleNamespace(
-            _datalab_launch_code="launch-code",
+            _datalab_authorization_code="authorization-code",
+            _datalab_code_verifier="A" * 43,
+            _datalab_expected_user_id=payload["user_id"],
             _datalab_candidate_token=payload["tool_access_token"],
             _datalab_renew_existing_session=True,
         )
@@ -139,7 +178,12 @@ class AuthenticatorTests(IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             request_kwargs["json"],
-            {"code": "launch-code", "renew_existing_session": True},
+            {
+                "authorization_code": "authorization-code",
+                "code_verifier": "A" * 43,
+                "expected_user_id": payload["user_id"],
+                "renew_existing_session": True,
+            },
         )
         self.assertEqual(authenticated["name"], f"datalab-{payload['user_id']}")
         self.assertNotIn("notebook_launch_code", authenticated["auth_state"])
@@ -151,7 +195,10 @@ class AuthenticatorTests(IsolatedAsyncioTestCase):
     async def test_authenticate_rejects_renewed_without_reused(self):
         payload = valid_payload()
         payload["session_renewed"] = True
-        handler = SimpleNamespace(_datalab_launch_code="launch-code")
+        handler = SimpleNamespace(
+            _datalab_authorization_code="authorization-code",
+            _datalab_code_verifier="A" * 43,
+        )
 
         with patch.object(
             authenticator_module.httpx,
@@ -163,11 +210,29 @@ class AuthenticatorTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.status_code, 502)
 
+    async def test_fresh_hub_browser_omits_expected_subject(self):
+        payload = valid_payload()
+        requests = []
+        handler = SimpleNamespace(
+            _datalab_authorization_code="authorization-code",
+            _datalab_code_verifier="A" * 43,
+        )
+        with patch.object(
+            authenticator_module.httpx,
+            "AsyncClient",
+            side_effect=lambda **kwargs: _AsyncClient(_Response(payload), requests, **kwargs),
+        ):
+            authenticated = await self.authenticator.authenticate(handler)
+
+        self.assertNotIn("expected_user_id", requests[0][1]["json"])
+        self.assertEqual(authenticated["name"], f"datalab-{payload['user_id']}")
+
     async def test_authenticate_rejects_a_false_reuse_claim(self):
         payload = valid_payload()
         payload["session_reused"] = True
         handler = SimpleNamespace(
-            _datalab_launch_code="launch-code",
+            _datalab_authorization_code="authorization-code",
+            _datalab_code_verifier="A" * 43,
             _datalab_candidate_token="different-token",  # noqa: S106
         )
         with patch.object(
@@ -180,6 +245,24 @@ class AuthenticatorTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.status_code, 502)
 
+    async def test_authenticate_rejects_response_subject_mismatch_before_persistence(self):
+        payload = valid_payload()
+        handler = SimpleNamespace(
+            _datalab_authorization_code="authorization-code",
+            _datalab_code_verifier="A" * 43,
+            _datalab_expected_user_id="different-existing-user",
+        )
+        with patch.object(
+            authenticator_module.httpx,
+            "AsyncClient",
+            side_effect=lambda **kwargs: _AsyncClient(_Response(payload), [], **kwargs),
+        ):
+            with self.assertRaises(web.HTTPError) as raised:
+                await self.authenticator.authenticate(handler)
+
+        self.assertEqual(raised.exception.status_code, 502)
+        self.assertFalse(hasattr(handler, "_datalab_exchange"))
+
     async def test_authenticate_applies_a_wall_clock_exchange_deadline(self):
         client = _AsyncClient(_Response(valid_payload()), [])
 
@@ -187,7 +270,10 @@ class AuthenticatorTests(IsolatedAsyncioTestCase):
             await asyncio.Event().wait()
 
         client.post = slow_post
-        handler = SimpleNamespace(_datalab_launch_code="launch-code")
+        handler = SimpleNamespace(
+            _datalab_authorization_code="authorization-code",
+            _datalab_code_verifier="A" * 43,
+        )
         with (
             patch.object(authenticator_module, "_EXCHANGE_TIMEOUT_SECONDS", 0.01),
             patch.object(authenticator_module.httpx, "AsyncClient", return_value=client),

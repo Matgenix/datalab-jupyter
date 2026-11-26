@@ -23,6 +23,7 @@ def set_launch_page_headers(handler: Any, *, script_nonce: str | None = None) ->
     directives.extend(("form-action 'self'", "base-uri 'none'", "frame-ancestors 'none'"))
     handler.set_header("Cache-Control", "no-store")
     handler.set_header("Referrer-Policy", "no-referrer")
+    handler.set_header("X-Content-Type-Options", "nosniff")
     handler.set_header("Content-Security-Policy", "; ".join(directives))
 
 
@@ -79,13 +80,13 @@ if (
 """
 
 
-def render_renewal_confirmation(handler: Any, launch_code: str, binding: str) -> str:
+def render_renewal_confirmation(handler: Any, authorization_code: str, binding: str) -> str:
     """Return the explicit near-expiry credential renewal choice."""
 
     set_launch_page_headers(handler)
     action = html.escape(handler.request.path, quote=True)
     token = _xsrf_token(handler)
-    code = html.escape(launch_code, quote=True)
+    code = html.escape(authorization_code, quote=True)
     signed_binding = html.escape(binding, quote=True)
     return f"""<!doctype html>
 <html lang="en">
@@ -101,7 +102,7 @@ remain.</p>
 credential or one at its hard age cap will be replaced and can restart the server.</p>
 <form method="post" action="{action}">
 <input type="hidden" name="_xsrf" value="{token}">
-<input type="hidden" name="datalab_launch_code" value="{code}">
+<input type="hidden" name="datalab_authorization_code" value="{code}">
 <input type="hidden" name="renewal_binding" value="{signed_binding}">
 <button type="submit" name="renew_existing_session" value="false">Continue without extending</button>
 <button type="submit" name="renew_existing_session" value="true">Extend Datalab access and open JupyterLab</button>

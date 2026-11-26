@@ -66,6 +66,13 @@ renewed credential retains the server, kernels, terminals, processes, unsaved
 in-memory state, and persistent files. Missing server provenance after a Hub
 restart also causes one conservative replacement.
 
+The Hub account is bound to the immutable datalab user authorized during the
+launch. To switch datalab accounts in one browser profile, first sign out of
+JupyterHub and then launch JupyterLab from the other datalab account. A launch
+never switches an existing Hub account automatically. One browser cookie
+context can have one outstanding launch; starting another makes the older
+callback fail and require relaunch.
+
 Each successful launch opens a new native JupyterLab workspace. A workspace
 keeps its own browser layout, but it is not a separate server, security boundary,
 or compute environment. Selected-items launches additionally create a separate
@@ -108,12 +115,18 @@ The distribution has three independently installable components:
 - `datalab-jupyter[server]`: Jupyter Server and IPython integration in each user
   environment.
 
-The provider issues a single-use launch grant. The Hub exchanges it with shared
-client credentials, optionally presenting the current encrypted token as a reuse
-or explicit-renewal candidate. It stores the authoritative temporary token and
-expiry in encrypted JupyterHub authentication state and injects the token only
-into the matching user server. Browser handoffs carry launch codes in URL
-fragments and submit them through same-origin, XSRF-protected POST requests.
+The provider issues a pending **service launch request code**. The Hub keeps an
+RFC 7636 verifier in a five-minute, signed, HttpOnly callback cookie and sends
+only its unpadded `S256` challenge to datalab's fixed browser authorization
+route. datalab matches that request to the current datalab browser user and
+returns a different **service authorization code**. The Hub then exchanges the
+authorization code and verifier with shared confidential-client credentials,
+binding any existing Hub subject before datalab issues or replaces a delegated
+token. It stores the authoritative temporary token and expiry in encrypted
+JupyterHub authentication state and injects the token only into the matching
+user server. Fragment-clearing pages submit both browser handoffs through
+same-origin, XSRF-protected POST requests; no handoff credential is placed in a
+query string.
 
 Provider, Hub, and server versions must be upgraded together. Installation does
 not itself start JupyterHub; the deployment chooses either the managed companion
