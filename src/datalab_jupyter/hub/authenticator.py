@@ -19,7 +19,10 @@ from jupyterhub.utils import url_path_join
 from tornado import web
 from traitlets import Unicode, validate
 
-from datalab_jupyter.config import validate_http_base_url
+from datalab_jupyter.config import (
+    allow_insecure_http_from_environment,
+    validate_http_base_url,
+)
 from datalab_jupyter.fragment_post import (
     render_fragment_post,
     render_renewal_confirmation,
@@ -689,6 +692,7 @@ class DatalabAuthenticator(Authenticator):
         return validate_http_base_url(
             proposal["value"],
             name="DATALAB_JUPYTER_BROWSER_API_URL",
+            allow_insecure=allow_insecure_http_from_environment(),
         )
 
     @property

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Apply Datalab's explicit insecure-HTTP testing setting to the Hub public URL
+  and browser-facing API URL for trusted non-production previews.
 - Bound the process-wide Hub credential-exchange gate to eight admitted
   requests and a two-second lock wait, returning a generic retryable failure
   instead of accumulating an unbounded public login queue.

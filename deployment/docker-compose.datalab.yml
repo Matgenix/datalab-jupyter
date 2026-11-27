@@ -47,6 +47,7 @@ services:
       - DATALAB_JUPYTER_IDLE_TIMEOUT
       - DATALAB_JUPYTER_MAX_AGE
       - PYDATALAB_APP_URL
+      - PYDATALAB_TOOLS__ALLOW_INSECURE_HTTP
     healthcheck:
       test: ["CMD", "datalab-jupyter-healthcheck"]
       interval: 30s

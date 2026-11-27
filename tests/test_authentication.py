@@ -1,4 +1,5 @@
 import asyncio
+import os
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase, TestCase
@@ -145,6 +146,23 @@ class AuthenticatorTests(IsolatedAsyncioTestCase):
         )
         with self.assertRaises(ValueError):
             self.authenticator.get_handlers(SimpleNamespace(public_url=""))
+
+    def test_browser_api_url_allows_http_with_explicit_testing_exception(self):
+        with patch.dict(
+            os.environ,
+            {"PYDATALAB_TOOLS__ALLOW_INSECURE_HTTP": "true"},
+        ):
+            authenticator = DatalabAuthenticator(
+                api_url="http://datalab-api:5001",
+                browser_api_url="http://api.example.test/prefix",
+                client_id="jupyter-client",
+                client_secret="integration-secret",  # noqa: S106
+            )
+
+        self.assertEqual(
+            authenticator.browser_authorization_url,
+            "http://api.example.test/prefix/v0.1/tools/jupyter/service-launch/authorize",
+        )
 
     async def test_authenticate_sends_candidate_and_keeps_selection_request_local(self):
         payload = valid_payload()

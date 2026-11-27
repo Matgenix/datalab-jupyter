@@ -7,7 +7,10 @@ from urllib.parse import urlsplit
 
 from traitlets.config import get_config
 
-from datalab_jupyter.config import validate_http_base_url
+from datalab_jupyter.config import (
+    allow_insecure_http_from_environment,
+    validate_http_base_url,
+)
 from datalab_jupyter.hub import DatalabAuthenticator
 
 c = get_config()
@@ -36,16 +39,22 @@ def positive_integer_environment(name: str, default: int, maximum: int) -> int:
     return parsed_value
 
 
+allow_insecure_http = allow_insecure_http_from_environment()
 configured_public_url = os.environ.get("DATALAB_JUPYTER_PUBLIC_URL", "").strip()
 if configured_public_url:
     public_url = validate_http_base_url(
         configured_public_url,
         name="DATALAB_JUPYTER_PUBLIC_URL",
+        allow_insecure=allow_insecure_http,
     )
 else:
     app_url = os.environ.get("PYDATALAB_APP_URL", "").strip()
     if app_url:
-        app_base_url = validate_http_base_url(app_url, name="PYDATALAB_APP_URL")
+        app_base_url = validate_http_base_url(
+            app_url,
+            name="PYDATALAB_APP_URL",
+            allow_insecure=allow_insecure_http,
+        )
         public_url = f"{app_base_url}/jupyter"
     else:
         public_url = "http://localhost:8000/jupyter"
@@ -64,7 +73,11 @@ if not os.environ.get("JUPYTERHUB_CRYPT_KEY", "").strip():
 
 c.JupyterHub.authenticator_class = DatalabAuthenticator
 c.DatalabAuthenticator.api_url = required_environment("DATALAB_JUPYTER_API_URL")
-c.DatalabAuthenticator.browser_api_url = required_environment("DATALAB_JUPYTER_BROWSER_API_URL")
+c.DatalabAuthenticator.browser_api_url = validate_http_base_url(
+    required_environment("DATALAB_JUPYTER_BROWSER_API_URL"),
+    name="DATALAB_JUPYTER_BROWSER_API_URL",
+    allow_insecure=allow_insecure_http,
+)
 c.DatalabAuthenticator.client_id = required_environment("DATALAB_JUPYTER_CLIENT_ID")
 c.DatalabAuthenticator.client_secret = client_secret
 c.DatalabAuthenticator.allow_all = True

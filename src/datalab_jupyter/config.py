@@ -5,10 +5,27 @@ from dataclasses import dataclass
 from ipaddress import ip_address
 from urllib.parse import urlsplit
 
+ALLOW_INSECURE_HTTP_ENVIRONMENT = "PYDATALAB_TOOLS__ALLOW_INSECURE_HTTP"
+_TRUE_ENVIRONMENT_VALUES = {"1", "true", "yes", "on"}
+_FALSE_ENVIRONMENT_VALUES = {"", "0", "false", "no", "off"}
+
 
 def _environment(name: str) -> str | None:
     value = os.environ.get(name, "").strip()
     return value or None
+
+
+def allow_insecure_http_from_environment() -> bool:
+    """Return the explicit deployment-wide insecure-HTTP testing exception."""
+    value = os.environ.get(ALLOW_INSECURE_HTTP_ENVIRONMENT)
+    if value is None:
+        return False
+    normalized = value.strip().lower()
+    if normalized in _TRUE_ENVIRONMENT_VALUES:
+        return True
+    if normalized in _FALSE_ENVIRONMENT_VALUES:
+        return False
+    raise ValueError(f"{ALLOW_INSECURE_HTTP_ENVIRONMENT} must be a boolean")
 
 
 def validate_http_base_url(

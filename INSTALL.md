@@ -74,8 +74,8 @@ API base before `/v0.1`. Include a non-root API prefix, for example
 `DATALAB_JUPYTER_API_URL`, the frontend `PYDATALAB_APP_URL`, and the Hub
 `DATALAB_JUPYTER_PUBLIC_URL`. It is never inferred from request Host or
 forwarded headers. The browser API and Hub public URLs require HTTPS outside
-explicit loopback development; the broad datalab insecure-HTTP testing option
-does not relax this handoff.
+explicit loopback development by default. For trusted temporary testing only,
+`PYDATALAB_TOOLS__ALLOW_INSECURE_HTTP=true` also permits HTTP for these URLs.
 
 ### 4. Start the deployment
 
@@ -400,20 +400,16 @@ restart or rebuild the datalab API.
 
 HTTPS is required except for loopback URLs. For a trusted, temporary
 non-production deployment that must use another plain-HTTP address, set
-`PYDATALAB_TOOLS__ALLOW_INSECURE_HTTP=true` in the Datalab API process. The
-companion file intentionally does not forward it; add an explicit local
-override:
+`PYDATALAB_TOOLS__ALLOW_INSECURE_HTTP=true`. The core and companion Compose
+files forward it to the API and Hub. Also set the browser-facing API base:
 
-```yaml
-services:
-  api:
-    environment:
-      - PYDATALAB_TOOLS__ALLOW_INSECURE_HTTP
+```shell
+export PYDATALAB_TOOLS__ALLOW_INSECURE_HTTP=true
+export DATALAB_JUPYTER_BROWSER_API_URL='http://preview.example.test/api'
 ```
 
 This generic Datalab setting allows plain-HTTP launch URLs from every installed
-standalone tool. It does not remove authentication, authorization, the launch
-exchange, or shared client credentials, but HTTP can expose launch codes,
-tokens, and user data and must never be used in production. Existing local
-preview environment and override files using the former Jupyter-specific name
-must be updated when moving to these coordinated revisions.
+standalone tool and the Jupyter browser handoff. It does not remove
+authentication, authorization, the launch exchange, or shared client
+credentials, but HTTP can expose launch codes, tokens, and user data and must
+never be used in production.

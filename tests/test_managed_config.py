@@ -88,3 +88,44 @@ def test_managed_config_requires_browser_api_url_and_rejects_unsafe_public_urls(
     monkeypatch.setenv("DATALAB_JUPYTER_PUBLIC_URL", "http://hub.example.test/jupyter")
     with pytest.raises(ValueError, match="must use HTTPS"):
         runpy.run_path(str(CONFIG_PATH))
+
+
+def test_managed_config_rejects_unsafe_browser_api_url_by_default(monkeypatch):
+    monkeypatch.setitem(
+        REQUIRED_ENVIRONMENT,
+        "DATALAB_JUPYTER_BROWSER_API_URL",
+        "http://api.example.test",
+    )
+    with pytest.raises(ValueError, match="must use HTTPS"):
+        load_managed_config(monkeypatch)
+
+
+def test_managed_config_allows_http_preview_urls_with_explicit_exception(monkeypatch):
+    monkeypatch.setenv("PYDATALAB_TOOLS__ALLOW_INSECURE_HTTP", "true")
+    monkeypatch.setenv("DATALAB_JUPYTER_PUBLIC_URL", "http://hub.example.test/jupyter")
+    monkeypatch.setitem(
+        REQUIRED_ENVIRONMENT,
+        "DATALAB_JUPYTER_BROWSER_API_URL",
+        "http://api.example.test/api",
+    )
+
+    config = load_managed_config(monkeypatch)
+
+    assert config.JupyterHub.public_url == "http://hub.example.test/jupyter/"
+    assert config.DatalabAuthenticator.browser_api_url == "http://api.example.test/api"
+
+
+def test_managed_config_allows_http_app_url_fallback_with_explicit_exception(monkeypatch):
+    monkeypatch.setenv("PYDATALAB_TOOLS__ALLOW_INSECURE_HTTP", "true")
+    monkeypatch.setenv("PYDATALAB_APP_URL", "http://datalab.example.test")
+
+    config = load_managed_config(monkeypatch)
+
+    assert config.JupyterHub.public_url == "http://datalab.example.test/jupyter/"
+
+
+def test_managed_config_rejects_invalid_insecure_http_setting(monkeypatch):
+    monkeypatch.setenv("PYDATALAB_TOOLS__ALLOW_INSECURE_HTTP", "sometimes")
+
+    with pytest.raises(ValueError, match="must be a boolean"):
+        load_managed_config(monkeypatch)

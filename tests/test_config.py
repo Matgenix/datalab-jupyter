@@ -2,10 +2,41 @@ import os
 from unittest import TestCase
 from unittest.mock import patch
 
-from datalab_jupyter.config import load_plugin_settings, validate_http_base_url
+from datalab_jupyter.config import (
+    ALLOW_INSECURE_HTTP_ENVIRONMENT,
+    allow_insecure_http_from_environment,
+    load_plugin_settings,
+    validate_http_base_url,
+)
 
 
 class PluginSettingsTests(TestCase):
+    def test_insecure_http_environment_is_strict(self):
+        for value in ("1", "true", "TRUE", "yes", "on"):
+            with (
+                self.subTest(value=value),
+                patch.dict(os.environ, {ALLOW_INSECURE_HTTP_ENVIRONMENT: value}, clear=True),
+            ):
+                self.assertTrue(allow_insecure_http_from_environment())
+
+        for value in ("", "0", "false", "FALSE", "no", "off"):
+            with (
+                self.subTest(value=value),
+                patch.dict(os.environ, {ALLOW_INSECURE_HTTP_ENVIRONMENT: value}, clear=True),
+            ):
+                self.assertFalse(allow_insecure_http_from_environment())
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(allow_insecure_http_from_environment())
+
+        for value in ("enabled", "2"):
+            with (
+                self.subTest(value=value),
+                patch.dict(os.environ, {ALLOW_INSECURE_HTTP_ENVIRONMENT: value}, clear=True),
+            ):
+                with self.assertRaisesRegex(ValueError, "must be a boolean"):
+                    allow_insecure_http_from_environment()
+
     def test_pure_http_base_validation_requires_tls_except_loopback(self):
         self.assertEqual(
             validate_http_base_url(
