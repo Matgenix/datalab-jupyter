@@ -1,9 +1,11 @@
 # Installation and operations
 
 This guide is for deployment administrators. The standard deployment uses the
-companion Docker Compose file to run a managed JupyterHub beside datalab. Use the
-[external Hub](#external-jupyterhub) path only when an existing platform owns
-spawning, storage, isolation, and lifecycle management.
+companion Docker Compose file to run a managed JupyterHub beside datalab for
+authenticated users in one organizational trust domain. For mutually untrusted
+users or stronger tenant isolation, use the [external Hub](#external-jupyterhub)
+path on a platform that provides spawning, storage, isolation, and lifecycle
+management.
 
 `datalab-jupyter` is trusted code. Review one exact source revision, its
 dependencies and Dockerfile, and the resulting images before deployment. Install
