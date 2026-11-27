@@ -71,6 +71,33 @@ class ProviderTests(TestCase):
             allow_session_renewal=True,
         )
 
+    def test_launch_allows_http_callback_only_for_insecure_testing(self):
+        settings = SimpleNamespace(
+            client_id="jupyter-client",
+            browser_url=lambda _app_url: "http://jupyter.example.test/jupyter",
+        )
+        grants = create_autospec(ToolLaunchGrantIssuer, instance=True)
+        grants.issue_service_launch.return_value = "launch-code"
+
+        with patch.object(provider_module, "load_plugin_settings", return_value=settings):
+            with patch.object(provider_module.CONFIG.TOOLS, "ALLOW_INSECURE_HTTP", False):
+                provider = JupyterToolProvider()
+                with self.assertRaisesRegex(ValueError, "must use HTTPS"):
+                    provider.launch(SimpleNamespace(), grants)
+            grants.issue_service_launch.assert_not_called()
+
+            with patch.object(provider_module.CONFIG.TOOLS, "ALLOW_INSECURE_HTTP", True):
+                provider = JupyterToolProvider()
+                provider.launch(SimpleNamespace(), grants)
+
+        grants.issue_service_launch.assert_called_once_with(
+            "jupyter-client",
+            "http://jupyter.example.test/jupyter/hub/datalab-callback",
+            lifetime_seconds=5 * 60,
+            session_policy=ToolSessionPolicy.REUSE_OR_REPLACE,
+            allow_session_renewal=True,
+        )
+
     def test_exchange_requires_service_credentials_and_uses_service_helper(self):
         settings = SimpleNamespace(
             client_id="jupyter-client",

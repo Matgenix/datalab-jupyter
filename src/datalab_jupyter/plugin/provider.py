@@ -45,10 +45,11 @@ def _login_url(code: str, settings: PluginSettings) -> str:
     return f"{login_url}#{urlencode({'datalab_launch_code': code})}"
 
 
-def _callback_url(settings: PluginSettings) -> str:
+def _callback_url(settings: PluginSettings, *, allow_insecure_http: bool = False) -> str:
     base_url = validate_http_base_url(
         settings.browser_url(CONFIG.APP_URL),
         name="Datalab Jupyter public URL",
+        allow_insecure=allow_insecure_http,
     )
     return f"{base_url}/hub/datalab-callback"
 
@@ -93,7 +94,10 @@ class JupyterToolProvider(ToolProvider):
     def launch(self, context: ToolContext, grants: ToolLaunchGrantIssuer) -> str:
         code = grants.issue_service_launch(
             self.settings.client_id,
-            _callback_url(self.settings),
+            _callback_url(
+                self.settings,
+                allow_insecure_http=CONFIG.TOOLS.ALLOW_INSECURE_HTTP,
+            ),
             lifetime_seconds=5 * 60,
             session_policy=ToolSessionPolicy.REUSE_OR_REPLACE,
             allow_session_renewal=True,
