@@ -1,6 +1,8 @@
 import asyncio
+import html
 import logging
 import os
+import re
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -19,6 +21,13 @@ from datalab_jupyter.hub.authenticator import (
     _pkce_s256_challenge,
     _should_offer_renewal,
 )
+
+
+def _navigation_target(page: str) -> str:
+    match = re.search(r'id="navigation-target" type="hidden" value="([^"]+)"', page)
+    if match is None:
+        raise AssertionError("navigation target is missing")
+    return html.unescape(match.group(1))
 
 
 class _LifecycleCompletion:
@@ -371,7 +380,8 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(options["httponly"], True)
         self.assertEqual(options["samesite"], "Lax")
         self.assertIs(options["secure"], True)
-        redirect = urlsplit(handler.redirected_to[0])
+        navigation_target = _navigation_target(handler.finished)
+        redirect = urlsplit(navigation_target)
         self.assertEqual(
             f"{redirect.scheme}://{redirect.netloc}{redirect.path}",
             handler.authenticator.browser_authorization_url,
@@ -384,8 +394,9 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
             fragment["code_challenge"],
             _pkce_s256_challenge(verifier),
         )
-        self.assertNotIn(verifier, handler.redirected_to[0])
-        self.assertEqual(handler.redirected_to[2], 303)
+        self.assertNotIn(verifier, navigation_target)
+        self.assertIsNone(handler.redirected_to)
+        self.assertIn("form-action 'self'", handler.headers["Content-Security-Policy"])
 
     async def test_loopback_http_uses_non_secure_cookie_without_request_header_inference(self):
         handler = _Handler(code="A" * 43)
@@ -400,7 +411,9 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(options["secure"], False)
         self.assertEqual(options["path"], "/prefix/jupyter/hub/datalab-callback")
         self.assertTrue(
-            handler.redirected_to[0].startswith(handler.authenticator.browser_authorization_url)
+            _navigation_target(handler.finished).startswith(
+                handler.authenticator.browser_authorization_url
+            )
         )
 
     async def test_testing_exception_allows_http_public_url_with_non_secure_cookie(self):
@@ -442,22 +455,22 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(options["samesite"], "Lax")
         self.assertIs(options["secure"], True)
         self.assertTrue(
-            handler.redirected_to[0].startswith(
+            _navigation_target(handler.finished).startswith(
                 "https://api.example.test/v0.1/tools/jupyter/service-launch/authorize#"
             )
         )
-        self.assertNotIn("hostile", handler.redirected_to[0])
+        self.assertNotIn("hostile", _navigation_target(handler.finished))
 
     async def test_latest_initial_launch_overwrites_the_single_verifier_cookie(self):
         handler = _Handler(code="A" * 43)
         with patch(
             "datalab_jupyter.hub.authenticator.secrets.token_urlsafe",
-            side_effect=("A" * 43, "B" * 43),
+            side_effect=("A" * 43, "page-nonce-one", "B" * 43, "page-nonce-two"),
         ):
             await DatalabLoginHandler.post(handler)
-            first_challenge = urlsplit(handler.redirected_to[0]).fragment
+            first_challenge = urlsplit(_navigation_target(handler.finished)).fragment
             await DatalabLoginHandler.post(handler)
-            second_challenge = urlsplit(handler.redirected_to[0]).fragment
+            second_challenge = urlsplit(_navigation_target(handler.finished)).fragment
 
         self.assertEqual(handler.verifier_cookie, "B" * 43)
         self.assertNotEqual(first_challenge, second_challenge)

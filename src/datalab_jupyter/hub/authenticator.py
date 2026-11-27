@@ -25,6 +25,7 @@ from datalab_jupyter.config import (
 )
 from datalab_jupyter.fragment_post import (
     render_fragment_post,
+    render_navigation_page,
     render_renewal_confirmation,
     set_launch_page_headers,
 )
@@ -214,9 +215,11 @@ class DatalabLoginHandler(LoginHandler):
                 "code_challenge_method": "S256",
             }
         )
-        self.redirect(
-            f"{self.authenticator.browser_authorization_url}#{fragment}",
-            status=303,
+        self.finish(
+            render_navigation_page(
+                self,
+                f"{self.authenticator.browser_authorization_url}#{fragment}",
+            )
         )
 
     def _pkce_cookie_scope(self) -> tuple[str, bool]:

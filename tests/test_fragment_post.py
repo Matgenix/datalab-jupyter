@@ -2,7 +2,11 @@ import re
 from types import SimpleNamespace
 from unittest import TestCase
 
-from datalab_jupyter.fragment_post import render_fragment_post, render_renewal_confirmation
+from datalab_jupyter.fragment_post import (
+    render_fragment_post,
+    render_navigation_page,
+    render_renewal_confirmation,
+)
 
 
 class _Handler:
@@ -47,6 +51,27 @@ class FragmentPostTests(TestCase):
     def test_bootstrap_rejects_an_invalid_field_name(self):
         with self.assertRaises(ValueError):
             render_fragment_post(_Handler(), "unexpected-field")
+
+    def test_navigation_page_keeps_strict_csp_and_escapes_the_trusted_target(self):
+        handler = _Handler()
+
+        page = render_navigation_page(
+            handler,
+            "https://api.example.test/authorize?one=1&two=%3Cvalue%3E#proof",
+        )
+
+        self.assertIn(
+            'value="https://api.example.test/authorize?one=1&amp;two=%3Cvalue%3E#proof"',
+            page,
+        )
+        self.assertIn("window.location.replace", page)
+        self.assertIn("form-action 'self'", handler.headers["Content-Security-Policy"])
+        self.assertIn("script-src 'nonce-", handler.headers["Content-Security-Policy"])
+        self.assertEqual(handler.headers["Cache-Control"], "no-store")
+        self.assertEqual(handler.headers["Referrer-Policy"], "no-referrer")
+
+        with self.assertRaises(ValueError):
+            render_navigation_page(_Handler(), "javascript:alert(1)")
 
     def test_confirmation_escapes_bound_values_and_uses_protected_post(self):
         handler = _Handler()

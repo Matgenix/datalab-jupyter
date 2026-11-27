@@ -5,6 +5,7 @@ import json
 import re
 import secrets
 from typing import Any
+from urllib.parse import urlsplit
 
 _FIELD_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -74,6 +75,42 @@ if (
   form.elements.namedItem(expectedField).value = entries[0][1];
   form.submit();
 }}
+</script>
+</body>
+</html>
+"""
+
+
+def render_navigation_page(handler: Any, target_url: str) -> str:
+    """Return a protected page that navigates to one trusted HTTP(S) target."""
+
+    if not isinstance(target_url, str) or not target_url or target_url != target_url.strip():
+        raise ValueError("target_url must be an absolute HTTP(S) URL")
+    parsed = urlsplit(target_url)
+    try:
+        parsed.port
+    except ValueError as exc:
+        raise ValueError("target_url must be an absolute HTTP(S) URL") from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ValueError("target_url must be an absolute HTTP(S) URL")
+
+    nonce = secrets.token_urlsafe(18)
+    set_launch_page_headers(handler, script_nonce=nonce)
+    target = html.escape(target_url, quote=True)
+    return f"""<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Opening JupyterLab</title></head>
+<body>
+<p>Opening JupyterLab…</p>
+<input id="navigation-target" type="hidden" value="{target}">
+<script nonce="{nonce}">
+"use strict";
+window.location.replace(document.getElementById("navigation-target").value);
 </script>
 </body>
 </html>
