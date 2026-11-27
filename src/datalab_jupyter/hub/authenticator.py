@@ -31,6 +31,9 @@ EXCHANGE_PATH = "/v0.1/tools/plugins/jupyter/exchange"
 BROWSER_AUTHORIZATION_PATH = "/v0.1/tools/jupyter/service-launch/authorize"
 REUSE_CANDIDATE_HEADER = "DATALAB-EXISTING-TOOL-TOKEN"
 _EXCHANGE_TIMEOUT_SECONDS = 10.0
+_EXCHANGE_LOCK_WAIT_SECONDS = 2.0
+_EXCHANGE_RETRY_AFTER_SECONDS = 2
+_MAX_ADMITTED_EXCHANGES = 8
 _CREDENTIAL_FINGERPRINT_ATTRIBUTE = "_datalab_credential_fingerprint"
 _CREDENTIAL_FINGERPRINT_DOMAIN = b"datalab-jupyter:server-credential:v1\0"
 _CONFIRMATION_DOMAIN = b"datalab-jupyter:renewal-confirmation:v1\0"
@@ -44,6 +47,9 @@ _PKCE_VERIFIER_PATTERN = re.compile(r"^[A-Za-z0-9._~-]{43,128}$", re.ASCII)
 _USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$", re.ASCII)
 _INVALID_LAUNCH_MESSAGE = (
     "This launch is invalid or has expired. Return to Datalab and launch JupyterLab again."
+)
+_BUSY_LAUNCH_MESSAGE = (
+    "Jupyter authentication is temporarily busy. Return to Datalab and launch JupyterLab again."
 )
 
 
@@ -305,11 +311,27 @@ class DatalabLoginHandler(LoginHandler):
 
         self.set_header("Cache-Control", "no-store")
         self.set_header("Referrer-Policy", "no-referrer")
-        self._datalab_authorization_code = authorization_code
-        self._datalab_code_verifier = code_verifier
-        self._datalab_expected_user_id = expected_user_id
+        admission_token = self.authenticator._try_admit_exchange()
+        if admission_token is None:
+            self.statsd.incr("login.exchange_rejected")
+            self.set_header("Retry-After", str(_EXCHANGE_RETRY_AFTER_SECONDS))
+            raise web.HTTPError(503, _BUSY_LAUNCH_MESSAGE)
+
+        lock_acquired = False
         try:
-            async with self.authenticator.exchange_lock:
+            try:
+                async with asyncio.timeout(_EXCHANGE_LOCK_WAIT_SECONDS):
+                    await self.authenticator.exchange_lock.acquire()
+                lock_acquired = True
+            except TimeoutError as exc:
+                self.statsd.incr("login.exchange_wait_timeout")
+                self.set_header("Retry-After", str(_EXCHANGE_RETRY_AFTER_SECONDS))
+                raise web.HTTPError(503, _BUSY_LAUNCH_MESSAGE) from exc
+
+            self._datalab_authorization_code = authorization_code
+            self._datalab_code_verifier = code_verifier
+            self._datalab_expected_user_id = expected_user_id
+            try:
                 candidate = await self._candidate_state()
                 if confirmation_binding is not None:
                     self._require_confirmation_binding(
@@ -320,16 +342,20 @@ class DatalabLoginHandler(LoginHandler):
                 self._datalab_candidate_token = candidate.token if candidate is not None else None
                 self._datalab_renew_existing_session = renew_existing_session
                 user = await self.login_user()
+            finally:
+                for attribute in (
+                    "_datalab_authorization_code",
+                    "_datalab_code_verifier",
+                    "_datalab_expected_user_id",
+                    "_datalab_candidate_token",
+                    "_datalab_renew_existing_session",
+                ):
+                    if hasattr(self, attribute):
+                        delattr(self, attribute)
         finally:
-            for attribute in (
-                "_datalab_authorization_code",
-                "_datalab_code_verifier",
-                "_datalab_expected_user_id",
-                "_datalab_candidate_token",
-                "_datalab_renew_existing_session",
-            ):
-                if hasattr(self, attribute):
-                    delattr(self, attribute)
+            if lock_acquired:
+                self.authenticator.exchange_lock.release()
+            self.authenticator._release_exchange(admission_token)
         if user is None:
             raise web.HTTPError(403, _INVALID_LAUNCH_MESSAGE)
 
@@ -642,6 +668,21 @@ class DatalabAuthenticator(Authenticator):
         if not self.browser_api_url:
             raise ValueError("DATALAB_JUPYTER_BROWSER_API_URL must be configured")
         self.exchange_lock = asyncio.Lock()
+        self._exchange_admission_tokens: set[object] = set()
+
+    def _try_admit_exchange(self) -> object | None:
+        """Reserve one bounded Hub-local exchange slot without waiting."""
+
+        if len(self._exchange_admission_tokens) >= _MAX_ADMITTED_EXCHANGES:
+            return None
+        token = object()
+        self._exchange_admission_tokens.add(token)
+        return token
+
+    def _release_exchange(self, token: object) -> None:
+        """Release a previously admitted exchange slot."""
+
+        self._exchange_admission_tokens.discard(token)
 
     @validate("browser_api_url")
     def _validate_browser_api_url(self, proposal: dict[str, Any]) -> str:

@@ -88,6 +88,22 @@ class _User:
         return self.auth_state
 
 
+class _Authenticator:
+    def __init__(self):
+        self.api_url = "http://datalab-api:5001"
+        self.browser_authorization_url = (
+            "https://api.example.test/v0.1/tools/jupyter/service-launch/authorize"
+        )
+        self.exchange_lock = asyncio.Lock()
+        self._exchange_admission_tokens = set()
+
+    def _try_admit_exchange(self):
+        return DatalabAuthenticator._try_admit_exchange(self)
+
+    def _release_exchange(self, token):
+        DatalabAuthenticator._release_exchange(self, token)
+
+
 class _Handler:
     xsrf_token = b"xsrf-token"
     slow_spawn_timeout = 10
@@ -115,7 +131,8 @@ class _Handler:
             path="/hub/datalab-callback",
             uri="/hub/datalab-callback",
         )
-        self.statsd = SimpleNamespace(incr=lambda _name: None)
+        self.metrics = []
+        self.statsd = SimpleNamespace(incr=self.metrics.append)
         self.headers = {}
         self.finished = None
         self.redirected_to = None
@@ -139,13 +156,7 @@ class _Handler:
         self.spawner = _Spawner(ready=ready, pending=pending, events=self.events)
         self.user = _User(self.spawner)
         self.current_user = self.user
-        self.authenticator = SimpleNamespace(
-            api_url="http://datalab-api:5001",
-            browser_authorization_url=(
-                "https://api.example.test/v0.1/tools/jupyter/service-launch/authorize"
-            ),
-            exchange_lock=asyncio.Lock(),
-        )
+        self.authenticator = _Authenticator()
         self.settings = {
             "cookie_secret": b"test-cookie-secret",
             "public_url": "https://hub.example.test/jupyter/",
@@ -473,6 +484,7 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status_code, 403)
         self.assertEqual(invalid_code.verifier_cookie, "A" * 43)
         self.assertEqual(invalid_code.cookies_cleared, [])
+        self.assertEqual(invalid_code.authenticator._exchange_admission_tokens, set())
 
     async def test_callback_binds_existing_subject_even_when_candidate_expired_and_clears_cookie(
         self,
@@ -516,6 +528,8 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.status_code, 409)
         self.assertEqual(handler.login_calls, 0)
+        self.assertFalse(handler.authenticator.exchange_lock.locked())
+        self.assertEqual(handler.authenticator._exchange_admission_tokens, set())
         self.assertEqual(handler.cookies_cleared, [])
 
     async def test_callback_rejects_inconsistent_existing_subject_without_lifecycle_changes(self):
@@ -609,6 +623,8 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.status_code, 409)
         self.assertEqual(handler.login_calls, 0)
+        self.assertFalse(handler.authenticator.exchange_lock.locked())
+        self.assertEqual(handler.authenticator._exchange_admission_tokens, set())
 
     async def test_confirmation_binding_rejects_code_user_token_and_api_tampering(self):
         expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
@@ -827,6 +843,7 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status_code, 403)
         self.assertNotIn("stop", handler.events)
         self.assertFalse(handler.authenticator.exchange_lock.locked())
+        self.assertEqual(handler.authenticator._exchange_admission_tokens, set())
 
     async def test_exchange_gate_releases_when_login_is_cancelled(self):
         handler = _Handler(login_error=asyncio.CancelledError())
@@ -835,7 +852,92 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
             await DatalabCallbackHandler.post(handler)
 
         self.assertFalse(handler.authenticator.exchange_lock.locked())
+        self.assertEqual(handler.authenticator._exchange_admission_tokens, set())
         self.assertFalse(hasattr(handler, "_datalab_authorization_code"))
+
+    async def test_exchange_admission_rejects_a_ninth_request_before_login(self):
+        handler = _Handler()
+        tokens = [handler.authenticator._try_admit_exchange() for _index in range(8)]
+        self.assertTrue(all(token is not None for token in tokens))
+
+        try:
+            with self.assertRaises(web.HTTPError) as raised:
+                await DatalabCallbackHandler.post(handler)
+
+            self.assertEqual(raised.exception.status_code, 503)
+            self.assertEqual(handler.headers["Retry-After"], "2")
+            self.assertIn("temporarily busy", str(raised.exception))
+            self.assertNotIn(handler.code, str(raised.exception))
+            self.assertEqual(handler.metrics, ["login.request", "login.exchange_rejected"])
+            self.assertEqual(handler.login_calls, 0)
+            self.assertEqual(handler.verifier_cookie, "A" * 43)
+            self.assertEqual(handler.cookies_cleared, [])
+            self.assertFalse(hasattr(handler, "_datalab_authorization_code"))
+        finally:
+            for token in tokens:
+                if token is not None:
+                    handler.authenticator._release_exchange(token)
+
+        self.assertEqual(handler.authenticator._exchange_admission_tokens, set())
+        await DatalabCallbackHandler.post(handler)
+        self.assertEqual(handler.login_calls, 1)
+
+    async def test_exchange_lock_wait_is_bounded_without_releasing_the_holder(self):
+        handler = _Handler()
+        await handler.authenticator.exchange_lock.acquire()
+
+        try:
+            with (
+                patch(
+                    "datalab_jupyter.hub.authenticator._EXCHANGE_LOCK_WAIT_SECONDS",
+                    0.01,
+                ),
+                self.assertRaises(web.HTTPError) as raised,
+            ):
+                await DatalabCallbackHandler.post(handler)
+
+            self.assertEqual(raised.exception.status_code, 503)
+            self.assertEqual(handler.headers["Retry-After"], "2")
+            self.assertIn("temporarily busy", str(raised.exception))
+            self.assertNotIn(handler.code, str(raised.exception))
+            self.assertEqual(
+                handler.metrics,
+                ["login.request", "login.exchange_wait_timeout"],
+            )
+            self.assertEqual(handler.login_calls, 0)
+            self.assertEqual(handler.verifier_cookie, "A" * 43)
+            self.assertEqual(handler.cookies_cleared, [])
+            self.assertTrue(handler.authenticator.exchange_lock.locked())
+            self.assertEqual(handler.authenticator._exchange_admission_tokens, set())
+            self.assertFalse(hasattr(handler, "_datalab_authorization_code"))
+        finally:
+            handler.authenticator.exchange_lock.release()
+
+        await DatalabCallbackHandler.post(handler)
+        self.assertEqual(handler.login_calls, 1)
+
+    async def test_cancellation_while_waiting_releases_only_the_admission_slot(self):
+        handler = _Handler()
+        await handler.authenticator.exchange_lock.acquire()
+        waiting = asyncio.create_task(DatalabCallbackHandler.post(handler))
+        for _index in range(10):
+            if handler.authenticator._exchange_admission_tokens:
+                break
+            await asyncio.sleep(0)
+        self.assertEqual(len(handler.authenticator._exchange_admission_tokens), 1)
+
+        waiting.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await waiting
+
+        self.assertTrue(handler.authenticator.exchange_lock.locked())
+        self.assertEqual(handler.authenticator._exchange_admission_tokens, set())
+        self.assertEqual(handler.login_calls, 0)
+        self.assertEqual(handler.verifier_cookie, "A" * 43)
+        handler.authenticator.exchange_lock.release()
+
+        await DatalabCallbackHandler.post(handler)
+        self.assertEqual(handler.login_calls, 1)
 
     async def test_superseded_credentials_fail_after_pending_spawn(self):
         handler = _Handler(pending="spawn")
@@ -878,6 +980,7 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(first.redirected_to[0], second.redirected_to[0])
         self.assertIn("/lab/workspaces/", first.redirected_to[0])
         self.assertIn("/lab/workspaces/", second.redirected_to[0])
+        self.assertEqual(first.authenticator._exchange_admission_tokens, set())
 
     async def test_unverified_ready_server_does_not_redirect(self):
         handler = _Handler(selected_items=False)
@@ -1011,10 +1114,7 @@ class PreparedHandlerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         target_user = _User(_Spawner())
         target_user.spawners = {}
         application = web.Application(
-            authenticator=SimpleNamespace(
-                api_url="http://datalab-api:5001",
-                exchange_lock=asyncio.Lock(),
-            ),
+            authenticator=_Authenticator(),
             existing_user=existing_user,
             target_user=target_user,
             statsd=SimpleNamespace(incr=lambda _name: None),
@@ -1051,10 +1151,7 @@ class PreparedHandlerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         target_user = _User(_Spawner())
         target_user.spawners = {}
         application = web.Application(
-            authenticator=SimpleNamespace(
-                api_url="http://datalab-api:5001",
-                exchange_lock=asyncio.Lock(),
-            ),
+            authenticator=_Authenticator(),
             existing_user=existing_user,
             target_user=target_user,
             statsd=SimpleNamespace(incr=lambda _name: None),

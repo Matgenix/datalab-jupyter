@@ -128,6 +128,14 @@ user server. Fragment-clearing pages submit both browser handoffs through
 same-origin, XSRF-protected POST requests; no handoff credential is placed in a
 query string.
 
+Hub credential exchanges remain serialized so that concurrent launches cannot
+persist stale or revoked authentication state. The Hub bounds this critical
+section to eight admitted requests: one active exchange and at most seven
+waiters. Requests beyond that capacity fail immediately, and waiters fail after
+two seconds, rather than forming an unbounded in-process queue. This is a local
+availability safeguard, not a replacement for reverse-proxy request-size and
+rate limits; see [INSTALL.md](INSTALL.md).
+
 Provider, Hub, and server versions must be upgraded together. Installation does
 not itself start JupyterHub; the deployment chooses either the managed companion
 Compose file or a compatible external Hub. The complete operational and

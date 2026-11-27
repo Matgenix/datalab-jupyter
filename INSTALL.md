@@ -104,6 +104,21 @@ Proxy the public `/jupyter/` path to it, or set
 - terminate TLS; and
 - disable request-body, cookie, and authorization-header logging.
 
+Limit request bodies for the Hub login and callback routes to 16 KiB, and apply
+endpoint-specific request-rate limits before traffic reaches the Hub. Size rate
+limits for the expected user population and allow for institutions where many
+legitimate users share one NAT address. Derive client addresses only from
+forwarding headers set by a known trusted proxy; accepting caller-supplied
+forwarding headers makes per-address limits ineffective.
+
+The Hub admits at most eight credential exchanges at once. One exchange runs
+while at most seven wait behind the process-wide credential-ordering lock. A
+waiting exchange receives a generic `503 Service Unavailable` after two seconds,
+and a ninth request is rejected immediately. These application limits bound the
+Hub-local queue even if proxy limits are absent, but sustained traffic can still
+keep the single exchange position busy. Monitor proxy rejections together with
+the Hub's `login.exchange_rejected` and `login.exchange_wait_timeout` counters.
+
 The existing public API prefix must cover
 `/v0.1/tools/jupyter/service-launch/authorize`, and the Hub prefix must cover
 both `/hub/datalab-login` and `/hub/datalab-callback`; no new proxy rule is

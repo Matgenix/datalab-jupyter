@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Bound the process-wide Hub credential-exchange gate to eight admitted
+  requests and a two-second lock wait, returning a generic retryable failure
+  instead of accumulating an unbounded public login queue.
 - Replace the directly exchangeable browser launch URL with a two-code,
   browser-authorized handoff bound to an RFC 7636 `S256` verifier cookie, the
   confidential provider client, and any existing immutable Hub subject. Require
