@@ -42,6 +42,40 @@ jobs:
         run: uv run pytest -v
       - run: uv build
 
+  handoff-integration:
+    name: Datalab handoff integration
+    runs-on: ubuntu-latest
+    services:
+      mongo:
+        image: mongo:8.0.20-noble
+        ports:
+          - 27017:27017
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v5
+        with:
+          repository: Matgenix/datalab
+          ref: c0d1486d6055406a20d8634431c3400e35fd1505
+          path: datalab-core
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --locked --extra hub --group plugin-dev --dev
+      - name: Use the reviewed Datalab core revision
+        run: uv pip install --python .venv/bin/python --no-deps --editable datalab-core/pydatalab
+      - name: Run the cross-repository handoff regression
+        env:
+          DATALAB_CROSS_REPOSITORY_TEST: "1"
+        run: >-
+          uv run --no-sync pytest
+          tests/test_datalab_handoff_integration.py -v
+
   pre-commit:
     name: Pre-commit
     runs-on: ubuntu-latest
