@@ -231,6 +231,7 @@ class DatalabLoginHandler(LoginHandler):
             public_url = validate_http_base_url(
                 public_url_value,
                 name="JupyterHub.public_url",
+                allow_insecure=allow_insecure_http_from_environment(),
             )
         except ValueError as exc:
             raise web.HTTPError(500, "JupyterHub public URL is not safely configured") from exc
@@ -711,6 +712,7 @@ class DatalabAuthenticator(Authenticator):
         validate_http_base_url(
             public_url.rstrip("/"),
             name="JupyterHub.public_url",
+            allow_insecure=allow_insecure_http_from_environment(),
         )
 
         return [

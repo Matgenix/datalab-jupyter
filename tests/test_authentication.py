@@ -164,6 +164,20 @@ class AuthenticatorTests(IsolatedAsyncioTestCase):
             "http://api.example.test/prefix/v0.1/tools/jupyter/service-launch/authorize",
         )
 
+    def test_public_hub_url_allows_http_with_explicit_testing_exception(self):
+        with patch.dict(
+            os.environ,
+            {"PYDATALAB_TOOLS__ALLOW_INSECURE_HTTP": "true"},
+        ):
+            handlers = self.authenticator.get_handlers(
+                SimpleNamespace(public_url="http://hub.example.test/jupyter/")
+            )
+
+        self.assertEqual(
+            [path for path, _handler in handlers],
+            ["/datalab-login", "/datalab-callback"],
+        )
+
     async def test_authenticate_sends_candidate_and_keeps_selection_request_local(self):
         payload = valid_payload()
         payload.update(

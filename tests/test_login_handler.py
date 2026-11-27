@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -401,6 +402,20 @@ class LoginHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             handler.redirected_to[0].startswith(handler.authenticator.browser_authorization_url)
         )
+
+    async def test_testing_exception_allows_http_public_url_with_non_secure_cookie(self):
+        handler = _Handler(code="A" * 43)
+        handler.settings["public_url"] = "http://hub.example.test/jupyter/"
+
+        with patch.dict(
+            os.environ,
+            {"PYDATALAB_TOOLS__ALLOW_INSECURE_HTTP": "true"},
+        ):
+            await DatalabLoginHandler.post(handler)
+
+        options = handler.cookies_set[0][2]
+        self.assertIs(options["secure"], False)
+        self.assertEqual(options["path"], "/jupyter/hub/datalab-callback")
 
     async def test_pkce_cookie_overrides_hostile_global_options_and_host_headers(self):
         handler = _Handler(code="A" * 43)
